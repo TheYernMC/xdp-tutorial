@@ -1,0 +1,244 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Configurar dependencias
+#+OPTIONS: ^:nil
+
+Antes de poder empezar a completar los pasos de este tutorial de XDP,
+repasa este documento e instala los paquetes de software necesarios.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#basado-en-libxdp-y-libbpf][Basado en libxdp y libbpf]]
+  - [[#libxdp-y-libbpf-como-submódulos-de-git][libxdp y libbpf como submódulos de git]]
+- [[#dependencias][Dependencias]]
+  - [[#paquetes-en-fedora][Paquetes en Fedora]]
+  - [[#paquetes-en-debianubuntu][Paquetes en Debian/Ubuntu]]
+  - [[#paquetes-en-opensuse][Paquetes en openSUSE]]
+- [[#dependencia-de-cabeceras-del-kernel][Dependencia de cabeceras del kernel]]
+  - [[#paquetes-en-fedora][Paquetes en Fedora]]
+  - [[#paquetes-en-debianubuntu][Paquetes en Debian/Ubuntu]]
+  - [[#paquetes-en-opensuse][Paquetes en openSUSE]]
+- [[#herramientas-adicionales][Herramientas adicionales]]
+  - [[#paquetes-en-fedora][Paquetes en Fedora]]
+  - [[#paquetes-en-ubuntu][Paquetes en Ubuntu]]
+  - [[#paquetes-en-debian][Paquetes en Debian]]
+  - [[#paquetes-en-opensuse][Paquetes en openSUSE]]
+- [[#generar-los-ficheros-necesarios][Generar los ficheros necesarios]]
+
+* Basado en libxdp y libbpf
+
+Este tutorial de XDP se apoya en [[https://github.com/xdp-project/xdp-tools/][libxdp]] para cargar y gestionar
+programas XDP. La biblioteca libxdp se mantiene como parte del [[https://github.com/xdp-project][XDP
+Project]]. El tutorial también se apoya en [[https://github.com/libbpf/libbpf/][libbpf]] para facilitar el
+desarrollo y la carga de programas BPF. La biblioteca libbpf forma parte
+del árbol del kernel bajo [[https://github.com/torvalds/linux/blob/master/tools/lib/bpf/README.rst][tools/lib/bpf]], pero los ingenieros de
+Facebook mantienen una versión independiente en GitHub en
+https://github.com/libbpf/libbpf.
+
+** libxdp y libbpf como submódulos de git
+
+Este repositorio usa tanto [[https://github.com/xdp-project/xdp-tools/][libxdp]] como [[https://github.com/libbpf/libbpf][libbpf]] como submódulos de
+git.
+
+Empezaremos clonando este repositorio:
+
+#+begin_example
+git clone --recurse-submodules https://github.com/xdp-project/xdp-tutorial.git
+#+end_example
+
+
+Nota: Si te olvidaste de la opción --recurse-submodules en el paso
+anterior o ya lo clonaste anteriormente sin los submódulos, puedes usar
+el siguiente comando:
+
+#+begin_example
+git submodule update --init --recursive
+#+end_example
+
+Si necesitas añadir los submódulos a tu propio proyecto, puedes usar el
+comando:
+
+#+begin_example
+git submodule add https://github.com/xdp-project/xdp-tools/ xdp-tools
+git submodule add https://github.com/libbpf/libbpf/ libbpf
+#+end_example
+
+* Dependencias
+
+Las dependencias principales son =libxdp=, =libbpf=, =llvm=, =clang= y
+=libelf=. LLVM+clang compila nuestros programas en C restringido a
+bytecode BPF, que se almacena en un fichero objeto ELF (=libelf=), que es
+cargado por =libbpf= en el kernel mediante la syscall =bpf=. Los
+programas XDP se gestionan mediante =libxdp=, que implementa el
+protocolo de multi-despacho de XDP. Algunas de las lecciones también usan
+la utilidad =perf= para rastrear el comportamiento del kernel a través de
+tracepoints.
+
+Los Makefiles de este repositorio intentarán detectar si te falta alguna
+dependencia, y te darán algunas indicaciones.
+
+** Paquetes en Fedora
+
+En una máquina con la distribución Fedora Linux, instala los paquetes:
+
+#+begin_example
+sudo dnf install clang llvm m4
+sudo dnf install elfutils-libelf-devel libpcap-devel perf glibc-devel.i686
+#+end_example
+
+Ten en cuenta también que Fedora, por defecto, establece un límite en la
+cantidad de memoria bloqueada que el kernel permitirá, lo cual puede
+interferir con la carga de mapas BPF. El script =testenv.sh= ajustará
+esto por ti, pero si no lo usas probablemente tendrás problemas. Usa este
+comando para elevar el límite:
+
+#+begin_example
+  # ulimit -l 1024
+#+end_example
+
+Ten en cuenta que necesitas hacer esto en el shell que estés usando para
+cargar los programas (en particular, no funcionará con =sudo=).
+
+** Paquetes en Debian/Ubuntu
+
+En instalaciones de Debian y Ubuntu, instala las dependencias así:
+
+#+begin_example
+sudo apt install clang llvm libelf-dev libpcap-dev build-essential libc6-dev-i386 m4
+#+end_example
+
+Para instalar la utilidad 'perf', ejecuta esto en Debian:
+#+begin_example
+sudo apt install linux-perf
+#+end_example
+
+o esto en Ubuntu:
+
+#+begin_example
+sudo apt install linux-tools-$(uname -r)
+#+end_example
+
+** Paquetes en openSUSE
+
+En una máquina con la distribución openSUSE, instala los paquetes:
+
+#+begin_example
+sudo zypper install clang llvm libelf-devel libpcap-devel perf linux-glibc-devel
+#+end_example
+
+* Dependencia de cabeceras del kernel
+
+El kernel de Linux proporciona una serie de ficheros de cabecera, que
+normalmente se instalan en =/usr/include/linux=. Las diferentes
+distribuciones de Linux suelen proporcionar un paquete de software con
+estas cabeceras.
+
+Algunos de los ficheros de cabecera (de los que dependemos) se encuentran
+en el árbol del kernel bajo include/uapi/linux/ (por ejemplo,
+include/uapi/linux/bpf.h), pero no deberías incluir esos ficheros
+directamente, ya que pasan por un proceso de conversión cuando se
+exportan/instalan en el directorio =/usr/include/linux= de las
+distribuciones. En el árbol git del kernel puedes ejecutar el comando:
+=make headers_install=, que creará muchos ficheros de cabecera en el
+directorio "usr/".
+
+Por ahora, este tutorial depende del paquete de cabeceras del kernel
+proporcionado por tu distribución. Puede que más adelante decidamos
+sustituir algunas de ellas.
+
+** Paquetes en Fedora
+
+En una máquina con la distribución Fedora Linux, instala el paquete:
+#+begin_example
+sudo dnf install kernel-headers
+#+end_example
+
+** Paquetes en Debian/Ubuntu
+
+En instalaciones de Debian y Ubuntu, instala las cabeceras así
+
+#+begin_example
+sudo apt install linux-headers-$(uname -r)
+#+end_example
+
+** Paquetes en openSUSE
+
+En una máquina con la distribución openSUSE, instala el paquete:
+
+#+begin_example
+sudo zypper install kernel-devel
+#+end_example
+
+
+* Herramientas adicionales
+
+=bpftool= es la herramienta recomendada para inspeccionar los programas
+BPF que se ejecutan en tu sistema. También ofrece una manipulación
+sencilla de programas y mapas eBPF. =bpftool= forma parte del árbol del
+kernel de Linux bajo [[https://github.com/torvalds/linux/tree/master/tools/bpf/bpftool][tools/bpf/bpftool/]], pero algunas distribuciones
+de Linux también distribuyen la herramienta como paquete de software.
+
+Si tienes previsto trabajar con los ejemplos de procesamiento de
+paquetes, también deberías instalar tcpdump.
+
+** Paquetes en Fedora
+
+En una máquina con la distribución Fedora Linux, instala el paquete:
+
+#+begin_example
+sudo dnf install bpftool
+sudo dnf install tcpdump
+#+end_example
+
+** Paquetes en Ubuntu
+
+A partir de Ubuntu 19.10, bpftool se puede instalar con:
+
+#+begin_example
+sudo apt install linux-tools-common linux-tools-generic
+sudo apt install tcpdump
+#+end_example
+
+(Ubuntu 18.04 LTS también lo incluye, pero es una versión antigua y
+bastante limitada de bpftool.)
+
+** Paquetes en Debian
+
+A partir de Debian Bullseye, bpftool se puede instalar con:
+
+#+begin_example
+sudo apt install bpftool
+sudo apt install tcpdump
+#+end_example
+
+(Si estás en Debian Buster, puedes obtenerlo desde [[https://backports.debian.org][buster-backports]].)
+
+** Paquetes en openSUSE
+
+En una máquina con la distribución openSUSE Tumbleweed, instala el
+paquete:
+
+#+begin_example
+sudo zypper install bpftool
+sudo zypper install tcpdump
+#+end_example
+
+
+* Generar los ficheros necesarios
+
+Una vez que hayas instalado las dependencias, necesitas generar los
+ficheros necesarios para seguir los ejercicios.
+
+Empieza ejecutando ./configure desde la raíz del repositorio para
+asegurarte de que todas las dependencias están instaladas.
+
+#+begin_example
+./configure
+#+end_example
+
+Si falta alguna dependencia, debería mostrar algún error; si no, podemos
+continuar.
+
+Ahora ejecuta make para generar todos los ficheros necesarios:
+
+#+begin_example
+make
+#+end_example

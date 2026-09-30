@@ -1,0 +1,113 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial Práctico de Programación XDP
+#+OPTIONS: ^:nil
+
+Este repositorio contiene un tutorial cuyo objetivo es introducirte en los
+pasos básicos necesarios para escribir programas de forma efectiva para el
+sistema eXpress Data Path (XDP) del kernel de Linux, que ofrece
+procesamiento de paquetes programable de alto rendimiento integrado con el
+kernel.
+
+El tutorial se compone de una serie de lecciones, cada una de las cuales
+tiene su propio repositorio. Empieza por las lecciones que comienzan con
+"basicXX", y lee el fichero README.org de cada repositorio para obtener
+las instrucciones de esa lección.
+
+Sigue leyendo a continuación para obtener una introducción a XDP y una
+visión general de lo que aprenderás en este tutorial, o ve
+[[file:basic01-xdp-pass/README.org][directamente a la primera lección]].
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#introducción][Introducción]]
+- [[#primer-paso-configurar-dependencias][Primer paso: Configurar dependencias]]
+- [[#cómo-están-organizadas-las-lecciones][Cómo están organizadas las lecciones]]
+  - [[#lecciones-de-configuración-básica][Lecciones de configuración básica]]
+  - [[#lecciones-de-procesamiento-de-paquetes][Lecciones de procesamiento de paquetes]]
+  - [[#lecciones-avanzadas][Lecciones avanzadas]]
+
+* Introducción
+
+XDP forma parte del kernel de Linux oficial (upstream), y permite a los
+usuarios instalar programas de procesamiento de paquetes en el kernel,
+que se ejecutarán para cada paquete que llegue, antes de que el kernel
+realice cualquier otro procesamiento sobre los datos. Los programas se
+escriben en C restringido, y se compilan al formato de bytecode eBPF, que
+se ejecuta y se compila JIT en el kernel, tras ser verificado por
+seguridad. Este enfoque ofrece gran flexibilidad y alto rendimiento, y se
+integra bien con el resto del sistema. Para una introducción general a
+XDP, lee [[https://github.com/xdp-project/xdp-paper/blob/master/xdp-the-express-data-path.pdf][el artículo académico (pdf)]], o la [[https://cilium.readthedocs.io/en/latest/bpf/][guía de referencia de Cilium BPF]].
+
+Este tutorial pretende ser una introducción práctica a los diferentes
+pasos necesarios para escribir con éxito programas útiles usando el
+sistema XDP. Asumimos que tienes un conocimiento básico de las redes en
+Linux y de cómo configurarlas con el conjunto de herramientas
+=iproute2=, pero no asumimos experiencia previa con eBPF o XDP. También
+es útil tener experiencia previa en programación: todas las lecciones
+están escritas en C e incluyen algo de aritmética de punteros básica y
+aliasing.
+
+El tutorial está en desarrollo continuo, y se creó inicialmente para
+usarse como tutorial en directo en la [[https://www.netdevconf.org/0x13/session.html?tutorial-XDP-hands-on][Netdev Conference]] en Praga en
+marzo de 2019. Dado que el subsistema BPF del kernel sigue
+desarrollándose a un ritmo acelerado, este tutorial no se ha mantenido al
+día con todos los avances. Sin embargo, todo lo presentado aquí
+funcionará con kernels recientes, y este tutorial funciona como una
+introducción autocontenida que cualquiera puede seguir para aprender los
+conceptos básicos de XDP. Las aportaciones y contribuciones para avanzar
+hacia este objetivo son muy bienvenidas; simplemente abre issues o pull
+requests en el [[https://github.com/xdp-project/xdp-tutorial/][repositorio de Github]].
+
+* Primer paso: Configurar dependencias
+
+Antes de poder empezar a completar los pasos de este tutorial,
+necesitarás instalar algunas dependencias en tu sistema. Estas se
+describen en [[file:setup_dependencies.org]].
+
+También proporcionamos un script de ayuda que configurará un entorno de
+pruebas con interfaces virtuales para que puedas probar tu código. Este
+se presenta en las lecciones básicas, y también tiene [[file:testenv/README.org][su propio fichero
+README]].
+
+* Cómo están organizadas las lecciones
+El tutorial está organizado en una serie de lecciones; cada lección tiene
+su propio subdirectorio, y las lecciones se agrupan por categoría:
+
+- Configuración básica (directorios que empiezan por basicXX)
+- Procesamiento de paquetes (directorios que empiezan por packetXX)
+- Temas avanzados (directorios que empiezan por advancedXX)
+
+Te recomendamos que empieces por las lecciones "básicas", y que sigas las
+lecciones de cada categoría en orden numérico. Lee el fichero README.org
+de cada directorio de lección para obtener instrucciones sobre cómo
+completarla.
+
+** Lecciones de configuración básica
+Te recomendamos empezar por estas lecciones, ya que te enseñarán a
+compilar e inspeccionar los programas eBPF que implementarán tu código de
+procesamiento de paquetes, cómo cargarlos en el kernel, y cómo
+inspeccionar el estado después. Como parte de las lecciones básicas,
+también escribirás un cargador de programas eBPF que necesitarás en
+lecciones posteriores.
+
+** Lecciones de procesamiento de paquetes
+Una vez que tengas claros los conceptos básicos y sepas cómo cargar
+programas en el kernel, estarás listo para empezar a procesar
+paquetes. Las lecciones de la categoría de procesamiento de paquetes te
+enseñarán los diferentes pasos necesarios para procesar paquetes de
+datos, incluyendo el análisis (parsing), la reescritura, cómo indicar al
+kernel qué hacer con el paquete después del procesamiento, y cómo usar
+helpers para acceder a la funcionalidad existente del kernel.
+
+** Lecciones avanzadas
+Tras haber completado las lecciones de las categorías básica y de
+procesamiento de paquetes, deberías estar listo para escribir tu primer
+programa XDP real que realice un procesamiento útil de los paquetes que
+llegan al sistema. Sin embargo, hay algunos temas ligeramente más
+avanzados que probablemente te resultarán útiles cuando empieces a
+ampliar tu programa para que haga más cosas.
+
+Los temas cubiertos en las lecciones avanzadas incluyen cómo hacer que
+los programas eBPF de otras partes del kernel interactúen con tu programa
+XDP, el paso de metadatos entre programas, las mejores prácticas para
+interactuar con el espacio de usuario y las funcionalidades del kernel, y
+cómo ejecutar varios programas XDP en una misma interfaz.
