@@ -1,0 +1,253 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Basic01 - cargando tu primer programa BPF
+#+OPTIONS: ^:nil
+
+Bienvenido al primer paso de este tutorial de XDP.
+
+El lenguaje de programación para XDP es eBPF (Extended Berkeley Packet
+Filter), al que nos referiremos simplemente como BPF. Por tanto, este
+tutorial también será útil para aprender a escribir otros programas BPF;
+sin embargo, el enfoque principal está en los programas BPF que se pueden
+usar en el hook de XDP. En esta lección y en las siguientes nos
+centraremos en los conceptos básicos para poder empezar a trabajar con
+BPF; las lecciones posteriores construirán sobre esta base para enseñarte
+a hacer procesamiento de paquetes con XDP.
+
+Dado que esta es la primera lección, empezaremos con suavidad sin incluir
+ninguna tarea. En su lugar, simplemente lee el texto a continuación y
+asegúrate de poder cargar el programa y de entender qué está pasando.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#primer-paso-configurar-dependencias][Primer paso: configurar dependencias]]
+- [[#compilando-el-código-de-ejemplo][Compilando el código de ejemplo]]
+  - [[#código-xdp-sencillo][Código XDP sencillo]]
+  - [[#proceso-de-compilación][Proceso de compilación]]
+  - [[#inspeccionando-el-objeto-elf-bpf][Inspeccionando el objeto ELF de BPF]]
+- [[#cargando-y-el-hook-de-xdp][Cargando y el hook de XDP]]
+  - [[#cargando-mediante-iproute2-ip][Cargando mediante iproute2 ip]]
+  - [[#cargando-usando-xdp-loader][Cargando usando xdp-loader]]
+  - [[#cargando-usando-xdp_pass_user][Cargando usando xdp_pass_user]]
+  - [[#descargando-usando-xdp_pass_user][Descargando usando xdp_pass_user]]
+
+* Primer paso: configurar dependencias
+
+Hay una serie de dependencias de configuración necesarias para compilar
+el código fuente de este repositorio git. Por favor, lee y completa la
+guía [[file:../setup_dependencies.org]] si aún no lo has hecho.
+
+Luego vuelve aquí, y comprueba si el siguiente paso compila.
+
+* Compilando el código de ejemplo
+
+Si completaste la guía de configuración de dependencias, deberías poder
+simplemente ejecutar el comando =make= en este directorio. (El
+[[file:Makefile][Makefile]] y el script [[file:../configure][configure]] intentarán ser
+amables y detectar si no completaste los pasos de configuración).
+
+** Código XDP sencillo
+
+El código XDP muy sencillo usado en este paso se encuentra en
+[[file:xdp_pass_kern.c]], y se muestra a continuación:
+
+#+begin_src C
+SEC("xdp")
+int  xdp_prog_simple(struct xdp_md *ctx)
+{
+        return XDP_PASS;
+}
+#+end_src
+
+** Proceso de compilación
+
+El compilador LLVM+clang convierte este código en C restringido en
+bytecode BPF y lo almacena en un fichero objeto ELF, llamado
+=xdp_pass_kern.o=.
+
+** Inspeccionando el objeto ELF de BPF
+
+Puedes inspeccionar el contenido del fichero =xdp_pass_kern.o= con
+diferentes herramientas como =readelf= o =llvm-objdump=. Como el
+Makefile habilita la opción de depuración =-g= (versión de LLVM >= 4.0),
+la herramienta llvm-objdump puede anotar la salida del ensamblador con el
+código C original:
+
+Ejecuta: =llvm-objdump -S xdp_pass_kern.o=
+#+begin_example asm
+xdp_pass_kern.o:	file format ELF64-BPF
+
+Disassembly of section xdp:
+xdp_prog_simple:
+; {
+       0:	b7 00 00 00 02 00 00 00 	r0 = 2
+; return XDP_PASS;
+       1:	95 00 00 00 00 00 00 00 	exit
+#+end_example
+
+Si no quieres ver las instrucciones BPF en crudo, añade:
+=--no-show-raw-insn=. El define/enum XDP_PASS tiene el valor 2, como se
+puede ver en el volcado. El nombre de la sección "xdp" fue definido
+mediante =SEC("xdp")=, y =xdp_prog_simple:= es el nombre de nuestra
+función en C.
+
+* Cargando y el hook de XDP
+
+Como ya deberías entender a estas alturas, el bytecode BPF se almacena en
+un fichero ELF. Para cargarlo en el kernel, el espacio de usuario
+necesita un cargador de ELF que lea el fichero y lo pase al kernel en el
+formato correcto.
+
+La biblioteca *libbpf* proporciona tanto un cargador de ELF como varias
+funciones auxiliares de BPF. Entiende el BPF Type Format (BTF) e
+implementa la relocalización [[https://nakryiko.com/posts/bpf-core-reference-guide/][CO-RE]] como parte de la carga del ELF, que
+es de donde viene nuestra dependencia de libelf-devel.
+
+La biblioteca *libxdp* proporciona funciones auxiliares para cargar e
+instalar programas XDP usando el protocolo de multi-despacho de XDP, así
+como funciones auxiliares para usar sockets AF_XDP. La biblioteca
+*libxdp* usa *libbpf* y añade funcionalidades extra encima. En este
+tutorial aprenderás a escribir código en C usando las bibliotecas
+*libxdp* y *libbpf*.
+
+El código en C de [[file:xdp_pass_user.c]] (que se compila en el programa
+=xdp_pass_user=) muestra cómo escribir un cargador de BPF específicamente
+para nuestro fichero ELF =xdp_pass_kern.o=. Este cargador conecta el
+programa del fichero ELF a un hook de XDP en un dispositivo de red.
+
+Parece excesivo escribir un programa en C simplemente para cargar y
+conectar un programa BPF específico. Sin embargo, aún así lo incluimos en
+el tutorial porque te ayudará a integrar BPF en otros proyectos de código
+abierto.
+
+Hay algunas alternativas a escribir un nuevo cargador:
+
+ - La herramienta estándar iproute2
+ - El xdp-loader de xdp-tools
+
+** Cargando mediante iproute2 ip
+
+Iproute2 proporciona capacidad de carga de BPF basada en libbpf que se
+puede usar con la herramienta estándar =ip=; así que en este caso puedes
+en realidad cargar nuestro fichero ELF =xdp_pass_kern.o= (donde llamamos
+a nuestra sección ELF "xdp") de esta forma:
+
+#+begin_example sh
+$ sudo ip link set dev lo xdpgeneric obj xdp_pass_kern.o sec xdp
+#+end_example
+
+Listar el dispositivo mediante =ip link show= también muestra la
+información de XDP:
+
+#+begin_example sh
+$ sudo ip link show dev lo
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 xdpgeneric qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    prog/xdp id 408 name xdp_prog_simple tag 3b185187f1855c4c jited
+#+end_example
+
+Si lo ejecutas sin =sudo=, tendrías menos información:
+
+#+begin_example sh
+$ ip link show dev lo
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 xdpgeneric qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    prog/xdp id 408
+#+end_example
+
+Eliminando de nuevo el programa XDP del dispositivo:
+#+begin_example
+$ sudo ip link set dev lo xdpgeneric off
+#+end_example
+
+Es importante señalar que la herramienta =ip= de iproute2 no implementa
+el protocolo de multi-despacho de XDP. Cuando usamos esta herramienta,
+nuestro programa se conecta directamente a la interfaz =lo=.
+
+** Cargando usando xdp-loader
+
+El proyecto xdp-tools proporciona la herramienta =xdp-loader=, que tiene
+comandos para cargar, descargar y mostrar el estado de los programas XDP
+cargados.
+
+Podemos cargar nuestro programa =xdp_pass_kern.o= y conectarlo usando el
+protocolo de multi-despacho de XDP así:
+
+#+begin_example sh
+$ sudo xdp-loader load -m skb lo xdp_pass_kern.o
+#+end_example
+
+Podemos mostrar el estado de los programas XDP conectados al
+dispositivo:
+
+#+begin_example sh
+$ sudo xdp-loader status lo
+CURRENT XDP PROGRAM STATUS:
+
+Interface        Prio  Program name      Mode     ID   Tag               Chain actions
+--------------------------------------------------------------------------------------
+lo                     xdp_dispatcher    skb      486  94d5f00c20184d17
+ =>              50     xdp_prog_simple           493  3b185187f1855c4c  XDP_PASS
+#+end_example
+
+Podemos descargar el programa que acabamos de añadir (ID 493 en el
+ejemplo anterior) usando este comando:
+
+#+begin_example sh
+sudo xdp-loader unload -i 493 lo
+#+end_example
+
+O descargar todos los programas usando este comando:
+
+#+begin_example sh
+sudo xdp-loader unload -a lo
+#+end_example
+
+** Cargando usando xdp_pass_user
+
+Para cargar el programa usando nuestro propio cargador, ejecuta este
+comando:
+
+#+begin_example sh
+ $ sudo ./xdp_pass_user --dev lo
+ Success: Loading XDP prog name:xdp_prog_simple(id:732) on device:lo(ifindex:1)
+#+end_example
+
+Cargar el programa de nuevo añadirá una segunda instancia del programa al
+dispatcher de XDP en la interfaz.
+
+#+begin_example sh
+$ sudo ./xdp_pass_user -d lo
+Success: Loading XDP prog name:xdp_prog_simple(id:745) on device:lo(ifindex:1)
+
+$ sudo xdp-loader status lo
+CURRENT XDP PROGRAM STATUS:
+
+Interface        Prio  Program name      Mode     ID   Tag               Chain actions
+--------------------------------------------------------------------------------------
+lo                     xdp_dispatcher    skb      738  94d5f00c20184d17
+ =>              50     xdp_prog_simple           732  3b185187f1855c4c  XDP_PASS
+ =>              50     xdp_prog_simple           745  3b185187f1855c4c  XDP_PASS
+#+end_example
+
+Puedes listar los programas XDP en el dispositivo usando diferentes
+comandos, y verificar que el ID del programa es el mismo:
+- =ip link list dev lo=
+- =bpftool net list dev lo=
+- =xdp-loader status lo=
+
+** Descargando usando xdp_pass_user
+
+Para descargar el programa usando nuestro propio cargador, usa este
+comando, con el =id= del programa a descargar:
+
+#+begin_example sh
+$ sudo ./xdp_pass_user --dev lo -U 745
+Detaching XDP program with ID 745 from lo
+Success: Unloading XDP prog name: xdp_prog_simple
+#+end_example
+
+También puedes descargar todos los programas del hook de XDP en el
+dispositivo usando este comando:
+
+#+begin_example sh
+$ sudo ./xdp_pass_user --dev lo --unload-all
+#+end_example
