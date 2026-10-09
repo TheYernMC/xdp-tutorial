@@ -1,0 +1,211 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Basic02 - cargando un programa por nombre
+#+OPTIONS: ^:nil
+
+En esta lección verás que un fichero ELF de BPF producido por LLVM puede
+contener más de un programa XDP, y cómo puedes seleccionar cuál cargar
+usando la *API de libxdp*. Completa cada una de las tareas a continuación
+para completar la lección.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#usando-libxdp-y-libbpf][Usando libxdp y libbpf]]
+  - [[#creando-un-programa-xdp][Creando un programa XDP]]
+  - [[#descarga-a-hardware][Descarga a hardware (offloading)]]
+- [[#tareas][Tareas]]
+  - [[#tarea-1-configurando-tu-laboratorio-de-pruebas][Tarea 1: Configurando tu laboratorio de pruebas]]
+  - [[#tarea-2-añadir-el-programa-xdp_abort][Tarea 2: Añadir el programa xdp_abort]]
+
+* Usando libxdp y libbpf
+
+La API de libbpf no solo proporciona los envoltorios básicos de llamadas
+al sistema (definidos en libbpf [[https://github.com/libbpf/libbpf/blob/master/src/bpf.h][bpf/bpf.h]]). La API también proporciona
+"[[https://libbpf.readthedocs.io/en/latest/libbpf_naming_convention.html#objects][objetos]]" y funciones para trabajar con ellos (definidos en el include
+[[https://github.com/libbpf/libbpf/blob/master/src/libbpf.h][bpf/libbpf.h]]).
+
+Las estructuras de C correspondientes a los objetos de libbpf son:
+ - struct =bpf_object=
+ - struct =bpf_program=
+ - struct =bpf_map=
+
+Estas estructuras son para uso interno de libbpf, y debes usar las
+funciones de la API para interactuar con estos objetos opacos. Las
+funciones que trabajan con un objeto se nombran igual que la estructura,
+seguido de un doble guión bajo, y un nombre descriptivo.
+
+La API de libxdp proporciona objetos y funciones para trabajar con
+programas XDP, así como objetos y funciones para trabajar con sockets
+AF_XDP, definidos en [[https://github.com/xdp-project/xdp-tools/blob/master/headers/xdp/libxdp.h][xdp/libxdp.h]].
+
+Las estructuras de C correspondientes a los objetos de libxdp son:
+ - struct =xdp_program=
+ - struct =xdp_multiprog=
+ - struct =xsk_umem=
+ - struct =xsk_socket=
+
+Veamos el uso práctico de libxdp y libbpf.
+
+** Creando un programa XDP
+
+En [[file:xdp_loader.c]] la función =xdp_program__create()= se usa para
+crear un objeto =xdp_program=, en este caso cargando el programa desde un
+fichero ELF. La estructura =xdp_program= representa un único programa XDP
+que se puede configurar y conectar a un hook de XDP.
+
+Usamos =filename= y =progname= para identificar el programa XDP que
+queremos crear a partir del fichero ELF, mediante la estructura
+=xdp_program_opts=:
+
+#+begin_example C
+DECLARE_LIBBPF_OPTS(bpf_object_open_opts, opts);
+DECLARE_LIBXDP_OPTS(xdp_program_opts, xdp_opts,
+        .open_filename = cfg->filename,
+        .prog_name = cfg->progname,
+        .opts = &opts);
+#+end_example
+
+Cuando se crea una estructura =xdp_program= a partir de un fichero ELF,
+mantiene una referencia al =bpf_object= subyacente, que se puede usar
+para acceder a todos los programas y mapas BPF del fichero ELF. Podemos
+usar la función =xdp_program__bpf_obj(prog)= para obtener el
+=bpf_object= a partir del =xdp_program=.
+
+** Descarga a hardware (offloading)
+
+XDP también se puede descargar para ejecutarse en el hardware de la
+tarjeta de red (en algunas NICs compatibles con offload).
+
+El flag de XDP XDP_FLAGS_HW_MODE habilita (solicita) la descarga a
+hardware, y se establece con la opción larga =--offload-mode=. El
+[[file:xdp_loader.c][código del cargador]] también necesita usar una llamada
+más avanzada de la API de libbpf, =bpf_prog_load_xattr()=, que nos
+permite establecer el ifindex, ya que esto es necesario en el momento de
+la carga para habilitar la descarga a hardware.
+
+Hay algunos detalles sobre cómo hacer funcionar la descarga a hardware en
+las SmartNICs Agilio de Netronome en [[file:xdp_offload_nfp.org]]; por
+ejemplo, el firmware necesita actualizarse para soportar eBPF.
+
+* Tareas
+
+** Tarea 1: Configurando tu laboratorio de pruebas
+
+Como esta lección implica cargar y seleccionar un programa XDP que
+simplemente descarta todos los paquetes (mediante la acción
+=XDP_DROP=), necesitarás cargarlo en una interfaz real para observar qué
+está pasando. Para ello, establecemos un entorno de laboratorio de
+pruebas. En el directorio [[file:../testenv/][testenv/]] encontrarás un script
+=testenv.sh= que te ayuda a configurar un laboratorio de pruebas basado
+en dispositivos =veth= y espacios de nombres de red.
+
+Por ejemplo, ejecuta el script así:
+#+begin_example sh
+$ sudo ../testenv/testenv.sh setup --name veth-basic02
+Setting up new environment 'veth-basic02'
+Setup environment 'veth-basic02' with peer ip fc00:dead:cafe:1::2.
+#+end_example
+
+Esto resulta en la creación de una interfaz (exterior) llamada:
+=veth-basic02=. Puedes comprobar que la red del entorno está operativa
+haciendo ping a la dirección IPv6 del peer =fc00:dead:cafe:1::2= (como se
+ve en la salida del script).
+
+La *tarea* consiste en cargar manualmente el programa xdp compilado en el
+fichero OBJ ELF =xdp_prog_kern.o=, usando el programa =xdp_loader= de
+este directorio. Observa las opciones disponibles que puedes dar a
+xdp_loader mediante =--help=. Intenta seleccionar el programa llamado
+=xdp_drop_func= mediante =--progname=, y observa mediante ping que los
+paquetes se descartan.
+
+Aquí tienes algunos comandos de ejemplo:
+#+begin_example sh
+sudo ./xdp_loader --help
+sudo ./xdp_loader --dev veth-basic02
+sudo ./xdp_loader --dev veth-basic02 --unload-all
+sudo ./xdp_loader --dev veth-basic02 --progname xdp_drop_func
+sudo ./xdp_loader --dev veth-basic02 --progname xdp_pass_func
+#+end_example
+
+*** Una nota sobre: el entorno de pruebas y las direcciones de los paquetes veth
+Cuando cargas un programa XDP en la interfaz visible en tu máquina
+anfitriona, este operará sobre todos los paquetes que lleguen *a* esa
+interfaz. Y dado que los paquetes que se envían desde una interfaz de un
+par veth llegan al otro extremo, los paquetes que verá tu programa XDP
+son los enviados desde *dentro* del espacio de nombres de red (netns).
+Esto significa que, al hacer pruebas, debes hacer el ping *desde dentro*
+del espacio de nombres de red creado por el script.
+
+Puedes "entrar" en el espacio de nombres manualmente (mediante =sudo ip
+netns exec veth-basic02 /bin/bash=) o mediante el script así:
+#+begin_example
+$ sudo ../testenv/testenv.sh enter --name veth-basic02
+# ping fc00:dead:cafe:1::1
+#+end_example
+
+Para facilitar esta prueba de conectividad con ping, el script también
+tiene un comando =ping= que hace ping desde dentro del netns:
+#+begin_example
+$ sudo ../testenv/testenv.sh ping --name veth-basic02
+#+end_example
+
+Deberías notar que lo *interesante* de usar netns como laboratorio de
+pruebas es que aún podemos "entrar" en el netns incluso cuando XDP está
+descartando todos los paquetes.
+
+*** Recomendado: Crear un alias para testenv.sh
+
+Para tener un acceso más rápido al script testenv.sh, te recomendamos
+crear un alias de shell (llamado =t=). El script testenv incluso tiene un
+comando de ayuda para este propósito:
+
+#+begin_example
+$ ../testenv/testenv.sh alias
+Eval this with `eval $(../testenv/testenv.sh alias)` to create shell alias
+WARNING: Creating sudo alias; be careful, this script WILL execute arbitrary programs
+
+alias t='sudo /home/fedora/git/xdp-tutorial/testenv/testenv.sh'
+#+end_example
+
+Como se indica, ejecuta:
+#+begin_example
+eval $(../testenv/testenv.sh alias)
+#+end_example
+
+Ahora deberías poder ejecutar los comandos de testenv como =t <comando>=
+(por ejemplo, =t ping=). Todos los ejemplos siguientes usarán esta
+sintaxis.
+
+*** Conveniencia: Omitir el nombre del entorno
+
+El script testenv guardará el último nombre de testenv usado, así que en
+la mayoría de los casos puedes omitir el parámetro =--name= al ejecutar
+el script. Si no especificas un nombre al ejecutar =t setup=, se generará
+un nombre aleatorio para ti.
+
+Puedes tener varios entornos de prueba activos al mismo tiempo, y siempre
+puedes seleccionar uno específico usando el parámetro =--name=. Ejecuta
+=t status= para ver el entorno actualmente seleccionado (es decir, el que
+se usará si no especificas uno con =--name=), así como la lista de todos
+los entornos actualmente activos.
+
+** Tarea 2: Añadir el programa xdp_abort
+
+Añade una nueva sección de programa "xdp_abort" en [[file:xdp_prog_kern.c]]
+que use (devuelva) la acción XDP =XDP_ABORTED= (y compílala mediante
+=make=). Carga este nuevo programa, por ejemplo de forma similar a lo
+anterior:
+
+#+begin_example sh
+sudo ./xdp_loader --dev veth-basic02 --unload-all
+sudo ./xdp_loader --dev veth-basic02 --progname xdp_abort_func
+#+end_example
+
+*Lección*: XDP_ABORTED es diferente de XDP_DROP, porque activa el
+tracepoint llamado =xdp:xdp_exception=.
+
+Mientras haces ping desde dentro del espacio de nombres, registra este
+tracepoint y observa estos registros. Por ejemplo, con perf así:
+
+#+begin_example sh
+sudo perf record -a -e xdp:xdp_exception sleep 4
+sudo perf script
+#+end_example
