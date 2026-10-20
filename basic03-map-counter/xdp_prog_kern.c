@@ -43,9 +43,17 @@ int  xdp_stats1_func(struct xdp_md *ctx)
 	 * use an atomic operation.
 	 */
 	lock_xadd(&rec->rx_packets, 1);
+	
 	/* Assignment#1: Add byte counters
 	 * - Hint look at struct xdp_md *ctx (copied below)
-	 *
+	 */
+	void *data_end 	= (void *)(long)ctx->data_end;
+	void *data_init = (void *)(long)ctx->data;
+	__u64 bytes		= data_end - data_init;
+
+	lock_xadd(&rec->rx_bytes, bytes);
+	
+	/*
 	 * Assignment#3: Avoid the atomic operation
 	 * - Hint there is a map type named BPF_MAP_TYPE_PERCPU_ARRAY
 	 */
