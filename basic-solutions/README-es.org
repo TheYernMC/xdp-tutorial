@@ -1,0 +1,74 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Packet - soluciones
+#+OPTIONS: ^:nil
+
+Este directorio contiene las soluciones a todas las tareas de las
+lecciones [[file:../basic01-xdp-pass/][basic01]], [[file:../basic02-prog-by-name/][basic02]], [[file:../basic03-map-counter/][basic03]] y
+[[file:../basic04-pinning-maps/][basic04]].
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#soluciones][Soluciones]]
+  - [[#basic01-cargando-tu-primer-programa-bpf][Basic01: cargando tu primer programa BPF]]
+  - [[#basic02-cargando-un-programa-por-nombre][Basic02: cargando un programa por nombre]]
+  - [[#basic03-contando-con-mapas-bpf][Basic03: contando con mapas BPF]]
+  - [[#basic04-fijación-pinning-de-mapas][Basic04: fijación (pinning) de mapas]]
+
+* Soluciones
+
+** Basic01: cargando tu primer programa BPF
+
+Esta lección no contiene ninguna tarea, solo hay que repetir los pasos
+indicados en el fichero README de la lección.
+
+** Basic02: cargando un programa por nombre
+
+*** Tarea 1: Configurando tu laboratorio de pruebas
+
+No se necesita código, solo repite los pasos indicados en la descripción
+de la tarea.
+
+*** Tarea 2: Añadir el programa xdp_abort
+
+Simplemente añade la siguiente sección al programa
+[[file:../basic02-prog-by-name/xdp_prog_kern.c][xdp_prog_kern.c]] y sigue
+los pasos indicados en la descripción de la tarea:
+#+begin_example c
+SEC("xdp_abort")
+int  xdp_abort_func(struct xdp_md *ctx)
+{
+    return XDP_ABORTED;
+}
+#+end_example
+
+** Basic03: contando con mapas BPF
+
+Las soluciones a las tres tareas se pueden encontrar en los siguientes
+ficheros:
+
+ * El fichero [[file:../basic04-pinning-maps/common_kern_user.h][common_kern_user.h]] contiene la nueva definición de la
+   estructura =datarec=.
+ * El fichero [[file:../basic04-pinning-maps/xdp_prog_kern.c][xdp_prog_kern.c]] contiene la nueva definición del mapa
+   =xdp_stats_map= y la función =xdp_stats_record_action= actualizada.
+
+Ten en cuenta que, para su uso en lecciones/tareas posteriores, el código
+se movió a los siguientes ficheros:
+[[file:../common/xdp_stats_kern_user.h][xdp_stats_kern_user.h]] y
+[[file:../common/xdp_stats_kern.h][xdp_stats_kern.h]]. Así que, para usar la
+función =xdp_stats_record_action= en programas XDP posteriores, solo
+incluye los siguientes ficheros de cabecera:
+#+begin_example c
+#include "../common/xdp_stats_kern_user.h"
+#include "../common/xdp_stats_kern.h"
+#+end_example
+Para una aplicación de espacio de usuario, solo se necesita la primera
+cabecera.
+
+** Basic04: fijación (pinning) de mapas
+
+*** Tarea 1: (xdp_stats.c) recargar el descriptor de fichero del mapa
+
+Consulta el programa [[file:xdp_stats.c][xdp_stats.c]] en este directorio.
+
+*** Tarea 2: (xdp_loader.c) reutilizar un mapa fijado
+
+Consulta el programa [[file:xdp_loader.c][xdp_loader.c]] en este directorio.
