@@ -8,8 +8,20 @@
  * - Here an array with XDP_ACTION_MAX (max_)entries are created.
  * - The idea is to keep stats per (enum) xdp_action
  */
+/*
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, struct datarec);
+	__uint(max_entries, XDP_ACTION_MAX);
+} xdp_stats_map SEC(".maps");
+*/
+
+/* Assignment#3: Per-CPU map, each CPU has its own copy of the values,
+ * so no atomic operation is needed. Userspace sums the values of all CPUs.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, __u32);
 	__type(value, struct datarec);
 	__uint(max_entries, XDP_ACTION_MAX);
@@ -62,9 +74,38 @@ int  xdp_stats1_func(struct xdp_md *ctx)
 }
 
 /*
+ * Assignment 3
+ */
+
+SEC("xdp")
+int  xdp_stats1_percpu_func(struct xdp_md *ctx)
+{
+	struct datarec *rec;
+	__u32 key = XDP_PASS; /* XDP_PASS = 2 */
+
+	/* Lookup in kernel BPF-side return pointer to this CPU's data record */
+	rec = bpf_map_lookup_elem(&xdp_stats_map, &key);
+	if (!rec)
+		return XDP_ABORTED;
+
+	/* With BPF_MAP_TYPE_PERCPU_ARRAY each CPU updates its own copy of
+	 * the record, so a plain (non-atomic) add is enough.
+	 */
+	rec->rx_packets++;
+
+	void *data_end 	= (void *)(long)ctx->data_end;
+	void *data_init = (void *)(long)ctx->data;
+	__u64 bytes		= data_end - data_init;
+
+	rec->rx_bytes += bytes;
+
+	return XDP_PASS;
+}
+
+/*
  * Assignment 2
  */
- 
+
 int  xdp_stats_record_action(struct xdp_md *ctx, int action)
 {
 
