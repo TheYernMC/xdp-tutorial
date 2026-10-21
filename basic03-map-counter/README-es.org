@@ -1,0 +1,268 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Basic03 - contando con mapas BPF
+#+OPTIONS: ^:nil
+
+En esta lección aprenderás sobre los mapas BPF, el mecanismo de
+almacenamiento persistente disponible para los programas BPF. Las tareas
+te darán experiencia práctica ampliando el tamaño/contenido del "valor",
+y leyendo los contenidos desde el espacio de usuario.
+
+En esta lección solo cubriremos dos tipos de mapas sencillos:
+ - =BPF_MAP_TYPE_ARRAY= y
+ - =BPF_MAP_TYPE_PERCPU_ARRAY=.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#lo-que-aprenderás-en-esta-lección][Lo que aprenderás en esta lección]]
+  - [[#definiendo-un-mapa][Definiendo un mapa]]
+  - [[#relocalización-elf-de-mapas-en-libbpf][Relocalización ELF de mapas en libbpf]]
+  - [[#de-bpf_object-a-bpf_map][De bpf_object a bpf_map]]
+  - [[#leyendo-valores-de-mapas-desde-el-espacio-de-usuario][Leyendo valores de mapas desde el espacio de usuario]]
+- [[#comandos-de-ejemplo-útiles][Comandos de ejemplo útiles]]
+- [[#tareas][Tareas]]
+  - [[#tarea-1-añadir-un-contador-de-bytes][Tarea 1: Añadir un contador de bytes]]
+  - [[#tarea-2-gestionar-estadísticas-de-otras-acciones-xdp][Tarea 2: Gestionar estadísticas de otras acciones XDP]]
+  - [[#tarea-3-estadísticas-por-cpu][Tarea 3: Estadísticas por CPU]]
+
+* Lo que aprenderás en esta lección
+
+
+** Definiendo un mapa
+
+Crear un mapa BPF se hace definiendo una estructura global (en
+[[file:xdp_prog_kern.c]]), con una sección especial =SEC(".maps")= como se
+muestra a continuación:
+
+#+begin_src C
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, struct datarec);
+	__uint(max_entries, XDP_ACTION_MAX);
+} xdp_stats_map SEC(".maps");
+#+end_src
+
+Los mapas BPF son almacenes genéricos de *clave/valor* (de ahí los
+parámetros de tipo =key= y =value=), con un =type= de mapa dado, y un
+número máximo de entradas permitidas =max_entries=. Aquí nos centramos en
+el sencillo =BPF_MAP_TYPE_ARRAY=, lo que significa que se reservan
+=max_entries= elementos del array cuando se crea el mapa por primera vez.
+
+El mapa BPF es accesible tanto desde el lado del programa BPF (kernel)
+como desde el espacio de usuario. Cómo se hace esto y en qué se
+diferencian es parte de esta lección.
+
+** Relocalización ELF de mapas en libbpf
+
+Vale la pena señalar que todo pasa por la syscall bpf. Esto significa que
+el programa de espacio de usuario /debe/ crear los mapas y programas con
+invocaciones separadas de la syscall bpf. Entonces, ¿cómo hace un
+programa BPF referencia a un mapa BPF?
+
+Esto ocurre cargando primero todos los mapas BPF, y almacenando sus
+descriptores de fichero (FD) correspondientes. Luego se usa la tabla de
+relocalización ELF para identificar cada referencia que el programa BPF
+hace a un mapa dado; cada una de estas referencias se reescribe después,
+de forma que las instrucciones del bytecode BPF usen el FD correcto para
+cada mapa.
+
+Todo esto necesita hacerse antes de que el propio programa BPF pueda
+cargarse en el kernel. Afortunadamente, la biblioteca libbpf gestiona la
+decodificación del objeto ELF y la relocalización de referencias a mapas,
+de forma transparente para el programa de espacio de usuario que realiza
+las cargas.
+
+** De bpf_object a bpf_map
+
+Como aprendiste en [[file:../basic02-prog-by-name/][basic02]], la API de libbpf tiene "objetos" y
+funciones que trabajan sobre/con estos objetos. La estructura
+=bpf_object= representa el propio objeto ELF.
+
+De forma similar a lo que hicimos para las funciones BPF, nuestro
+cargador tiene una función llamada =find_map_fd()= (en
+[[file:xdp_load_and_stats.c]]), que usa la función de biblioteca
+=bpf_object__find_map_by_name()= para encontrar el objeto =bpf_map= con
+un nombre dado. (Nota: la longitud del nombre del mapa la proporciona ELF
+y es más larga que la que el kernel almacena tras cargarlo). Después de
+encontrar el =bpf_map=, obtenemos el descriptor de fichero del mapa
+mediante =bpf_map__fd()=. También hay una función de libbpf que envuelve
+estos dos pasos, llamada =bpf_object__find_map_fd_by_name()=.
+
+** Leyendo valores de mapas desde el espacio de usuario
+
+El contenido de un mapa se lee desde el espacio de usuario mediante la
+función =bpf_map_lookup_elem()=, que es un simple envoltorio de syscall,
+que opera sobre el descriptor de fichero (FD) del mapa. La syscall busca
+la =key= y almacena el valor en el área de memoria proporcionada por el
+puntero de valor. Es responsabilidad del programa de espacio de usuario
+que hace la llamada asegurarse de que la memoria reservada para almacenar
+el valor devuelto sea suficientemente grande para almacenar el tipo de
+datos contenido en el mapa. En nuestro ejemplo demostramos cómo el
+espacio de usuario puede consultar el FD del mapa y obtener información
+en la estructura =bpf_map_info= mediante el envoltorio de syscall
+=bpf_obj_get_info_by_fd()=.
+
+Por ejemplo, el programa =xdp_load_and_stats= leerá periódicamente el
+valor de xdp_stats_map y generará algunas estadísticas.
+
+* Comandos de ejemplo útiles
+
+#+begin_src sh
+# Cargar el programa eBPF en la interfaz localhost
+sudo ./xdp_load_and_stats --dev lo
+
+# Descargar el programa eBPF de la interfaz localhost
+sudo ./xdp_load_and_stats --dev lo --unload-all
+
+# Recibir datos en el puerto 12345 de localhost
+ncat -lk 127.0.0.1 12345
+
+# Enviar datos al puerto 12345 de localhost
+printf 'hello from sender\n' | nc 127.0.0.1 12345
+#+end_src
+
+* Tareas
+
+Las tareas tienen marcas de "pista" en el código mediante comentarios
+=Assignment#num=.
+
+** Tarea 1: Añadir un contador de bytes
+
+El código de la tarea actual solo cuenta paquetes. Tu *tarea* es ampliar
+esto para contar también bytes.
+
+Fíjate en cómo se usa el mapa BPF =xdp_stats_map=:
+ - =.value_size = sizeof(struct datarec)=
+
+El mapa BPF no tiene conocimiento sobre la estructura de datos usada para
+el registro de valor, solo conoce el tamaño. (El [[https://github.com/torvalds/linux/blob/master/Documentation/bpf/btf.rst][BPF Type Format]]
+([[https://www.kernel.org/doc/html/latest/bpf/btf.html][BTF]]) es un tema avanzado, que permite asociar el conocimiento de la
+estructura de datos mediante información de depuración, pero lo ignoramos
+por ahora). Por tanto, es responsabilidad de ambos lados (espacio de
+usuario y el lado del kernel del programa BPF) asegurarse de mantenerse
+sincronizados sobre el contenido y la estructura de =value=. La pista
+aquí sobre la estructura de datos usada viene de
+=sizeof(struct datarec)=, que indica que se usa =struct datarec=.
+
+Esta =struct datarec= está definida en el include
+[[file:common_kern_user.h]] así:
+
+#+begin_src C
+/* This is the data record stored in the map */
+struct datarec {
+	__u64 rx_packets;
+	/* Assignment#1: Add byte counters */
+};
+#+end_src
+
+*** Tarea 1.1: Actualizar el programa BPF
+
+El siguiente paso es actualizar el programa BPF del lado del kernel:
+[[file:xdp_prog_kern.c]].
+
+Para averiguar la longitud del paquete, necesitas aprender sobre la
+variable de contexto =*ctx= con tipo [[https://elixir.bootlin.com/linux/v5.0/ident/xdp_md][struct xdp_md]], a la que el programa
+BPF recibe un puntero cuando el kernel lo invoca. Esta =struct xdp_md= es
+un poco peculiar, ya que todos sus miembros son de tipo =__u32=. Sin
+embargo, este no es en realidad su tipo de datos real, ya que el acceso a
+esta estructura de datos se remapea por el kernel cuando el programa se
+carga en el kernel. El acceso se remapea a la estructura =xdp_buff= y
+también a la estructura =xdp_rxq_info=.
+
+#+begin_src C
+struct xdp_md {
+	// (Note: type __u32 is NOT the real-type)
+	__u32 data;
+	__u32 data_end;
+	__u32 data_meta;
+	/* Below access go through struct xdp_rxq_info */
+	__u32 ingress_ifindex; /* rxq->dev->ifindex */
+	__u32 rx_queue_index;  /* rxq->queue_index */
+};
+#+end_src
+
+Aunque nosotros sabemos esto, el compilador no. Así que necesitamos
+convertir los campos a punteros void antes de poder usarlos:
+
+#+begin_src C
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data     = (void *)(long)ctx->data;
+#+end_src
+
+El siguiente paso es calcular el número de bytes de cada paquete,
+simplemente restando =data= de =data_end=, y actualizar el miembro de
+datarec.
+
+#+begin_src C
+	__u64 bytes = data_end - data; /* Calculate packet length */
+	lock_xadd(&rec->rx_bytes, bytes);
+#+end_src
+
+*** Tarea 1.2: Actualizar el programa de espacio de usuario
+
+Ahora es momento de actualizar el programa de espacio de usuario que lee
+las estadísticas (en [[file:xdp_load_and_stats.c]]).
+
+Actualiza las funciones:
+ - =map_collect()= para que también recoja rx_bytes.
+ - =stats_print()= para que también imprima rx_bytes (ajusta la cadena
+   de formato).
+
+** Tarea 2: Gestionar estadísticas de otras acciones XDP
+
+Fíjate en cómo el mapa BPF =xdp_stats_map= que definimos arriba es en
+realidad un array, con =max_entries=XDP_ACTION_MAX=. La idea de esto es
+mantener estadísticas por cada [[https://elixir.bootlin.com/linux/latest/ident/xdp_action][(enum) xdp_action]], pero nuestro programa
+todavía no aprovecha esto.
+
+La *tarea* es ampliar la herramienta de estadísticas de espacio de
+usuario (en [[file:xdp_load_and_stats.c]]) para recoger e imprimir estas
+estadísticas adicionales.
+
+** Tarea 3: Estadísticas por CPU
+
+Hasta ahora, hemos usado operaciones atómicas para incrementar nuestros
+contadores de estadísticas; sin embargo, esto es costoso, ya que inserta
+barreras de memoria para asegurar que las diferentes CPUs no corrompan
+los datos de las demás. Podemos evitar esto usando otro tipo de array que
+almacena sus datos en almacenamiento por CPU. El inconveniente de esto es
+que trasladamos la carga de sumar al espacio de usuario.
+
+Para lograr esto, el primer paso es cambiar el =type= del mapa (en
+[[file:xdp_prog_kern.c]]) para usar =BPF_MAP_TYPE_PERCPU_ARRAY=. Si solo
+haces este cambio, el programa de espacio de usuario lo detectará y se
+quejará, ya que consultamos el FD del mapa para obtener cierta
+información (mediante =bpf_obj_get_info_by_fd()=) y, por ejemplo,
+comprobamos el tipo de mapa. Recuerda que es responsabilidad del espacio
+de usuario asegurarse de que el registro de datos para el valor sea lo
+suficientemente grande.
+
+El siguiente paso es escribir una función que obtenga los valores por CPU
+y los sume. En [[file:xdp_load_and_stats.c]]. Puedes copiar y pegar esto, y
+llamarlo desde la sentencia switch-case en la función =map_collect()=:
+
+#+begin_src C
+/* BPF_MAP_TYPE_PERCPU_ARRAY */
+void map_get_value_percpu_array(int fd, __u32 key, struct datarec *value)
+{
+	/* For percpu maps, user space gets a value per possible CPU */
+	unsigned int nr_cpus = libbpf_num_possible_cpus();
+	struct datarec values[nr_cpus];
+	__u64 sum_bytes = 0;
+	__u64 sum_pkts = 0;
+	int i;
+
+	if ((bpf_map_lookup_elem(fd, &key, values)) != 0) {
+		fprintf(stderr,
+			"ERR: bpf_map_lookup_elem failed key:0x%X\n", key);
+		return;
+	}
+
+	/* Sum values from each CPU */
+	for (i = 0; i < nr_cpus; i++) {
+		sum_pkts  += values[i].rx_packets;
+		sum_bytes += values[i].rx_bytes;
+	}
+	value->rx_packets = sum_pkts;
+	value->rx_bytes   = sum_bytes;
+}
+#+end_src
