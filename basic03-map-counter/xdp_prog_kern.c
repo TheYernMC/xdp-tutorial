@@ -61,6 +61,57 @@ int  xdp_stats1_func(struct xdp_md *ctx)
 	return XDP_PASS;
 }
 
+/*
+ * Assignment 2
+ */
+ 
+int  xdp_stats_record_action(struct xdp_md *ctx, int action)
+{
+
+	struct datarec *rec;
+	__u32 key = action;
+
+	if (action >= XDP_ACTION_MAX)
+		return XDP_ABORTED;
+
+	/* Lookup in kernel BPF-side return pointer to actual data record */
+	rec = bpf_map_lookup_elem(&xdp_stats_map, &key);
+	/* BPF kernel-side verifier will reject program if the NULL pointer
+	 * check isn't performed here. Even-though this is a static array where
+	 * we know key lookup XDP_PASS always will succeed.
+	 */
+	if (!rec)
+		return XDP_ABORTED;
+
+	/* Multiple CPUs can access data record. Thus, the accounting needs to
+	 * use an atomic operation.
+	 */
+	lock_xadd(&rec->rx_packets, 1);
+	
+	/* Assignment#1: Add byte counters
+	 * - Hint look at struct xdp_md *ctx (copied below)
+	 */
+	void *data_end 	= (void *)(long)ctx->data_end;
+	void *data_init = (void *)(long)ctx->data;
+	__u64 bytes		= data_end - data_init;
+
+	lock_xadd(&rec->rx_bytes, bytes);
+	
+	/*
+	 * Assignment#3: Avoid the atomic operation
+	 * - Hint there is a map type named BPF_MAP_TYPE_PERCPU_ARRAY
+	 */
+
+	return action;
+}
+
+SEC("xdp")
+int xdp_mix_func(struct xdp_md *ctx)
+{
+	__u32 action = (bpf_get_prandom_u32() & 1) ? XDP_PASS : XDP_DROP;
+	return xdp_stats_record_action(ctx, action);
+}
+
 char _license[] SEC("license") = "GPL";
 
 /* Copied from: $KERNEL/include/uapi/linux/bpf.h
