@@ -38,6 +38,8 @@ static const struct option_wrapper long_options[] = {
 	{{0, 0, NULL,  0 }}
 };
 
+const char *map_name = "xdp_stats_map";
+
 #define NANOSEC_PER_SEC 1000000000 /* 10^9 */
 static __u64 gettime(void)
 {
@@ -191,7 +193,68 @@ static void stats_collect(int map_fd, __u32 map_type,
 	}
 }
 
-static void stats_poll(int map_fd, __u32 map_type, int interval)
+enum map_check {
+	MAP_CHECK_SAME,		/* Same map as before, keep using *map_fd */
+	MAP_CHECK_CHANGED,	/* Map replaced, *map_fd now points to new map */
+	MAP_CHECK_NOT_FOUND,	/* Map not pinned right now */
+	MAP_CHECK_ERR,		/* Any other error, keep using old *map_fd */
+};
+
+/* Reopen the pinned map and compare its id with the one behind *map_fd.
+ * If the map has been replaced (e.g. the XDP program was reloaded), close
+ * the old fd and start using the new one.
+ */
+static enum map_check check_map_changed(const char *pin_dir, int *map_fd,
+					struct bpf_map_info *info)
+{
+	struct bpf_map_info map_expect = { 0 };
+	struct bpf_map_info cur_info = { 0 };
+	struct bpf_map_info new_info = { 0 };
+	__u32 info_len = sizeof(cur_info);
+	int new_fd;
+
+	new_fd = open_bpf_map_file(pin_dir, map_name, &new_info);
+	if (new_fd < 0) {
+		if (errno == ENOENT) {
+			fprintf(stderr, "Map not found, is the XDP program loaded?\n");
+			return MAP_CHECK_NOT_FOUND;
+		}
+		return MAP_CHECK_ERR;
+	}
+
+	if (bpf_obj_get_info_by_fd(*map_fd, &cur_info, &info_len)) {
+		fprintf(stderr, "ERR: %s() can't get info - %s\n",
+			__func__, strerror(errno));
+		close(new_fd);
+		return MAP_CHECK_ERR;
+	}
+
+	if (new_info.id == cur_info.id) {
+		close(new_fd);
+		return MAP_CHECK_SAME;
+	}
+
+	/* check map info, e.g. datarec is expected size */
+	map_expect.key_size    = sizeof(__u32);
+	map_expect.value_size  = sizeof(struct datarec);
+	map_expect.max_entries = XDP_ACTION_MAX;
+	if (check_map_fd_info(&new_info, &map_expect)) {
+		fprintf(stderr, "ERR: new map via FD not compatible\n");
+		close(new_fd);
+		return MAP_CHECK_ERR;
+	}
+
+	if (verbose)
+		printf("Map changed: id:%d -> id:%d\n", cur_info.id, new_info.id);
+
+	close(*map_fd);
+	*map_fd = new_fd;
+	*info = new_info;
+	return MAP_CHECK_CHANGED;
+}
+
+static void stats_poll(const char *pin_dir, int map_fd,
+		       struct bpf_map_info *info, int interval)
 {
 	struct stats_record prev, record = { 0 };
 
@@ -199,12 +262,29 @@ static void stats_poll(int map_fd, __u32 map_type, int interval)
 	setlocale(LC_NUMERIC, "en_US");
 
 	/* Get initial reading quickly */
-	stats_collect(map_fd, map_type, &record);
+	stats_collect(map_fd, info->type, &record);
 	usleep(1000000/4);
 
 	while (1) {
+		switch (check_map_changed(pin_dir, &map_fd, info)) {
+		case MAP_CHECK_CHANGED:
+			/* New map starts from zero, the old counters are no
+			 * longer valid as previous values. Take a fresh reading.
+			 */
+			stats_collect(map_fd, info->type, &record);
+			usleep(1000000/4);
+			break;
+		case MAP_CHECK_NOT_FOUND:
+			/* Don't keep printing stats from the stale map */
+			sleep(interval);
+			continue;
+		case MAP_CHECK_SAME:
+		case MAP_CHECK_ERR:
+			break;
+		}
+
 		prev = record; /* struct copy */
-		stats_collect(map_fd, map_type, &record);
+		stats_collect(map_fd, info->type, &record);
 		stats_print(&record, &prev);
 		sleep(interval);
 	}
@@ -247,7 +327,7 @@ int main(int argc, char **argv)
 		return EXIT_FAIL_OPTION;
 	}
 
-	stats_map_fd = open_bpf_map_file(pin_dir, "xdp_stats_map", &info);
+	stats_map_fd = open_bpf_map_file(pin_dir, map_name, &info);
 	if (stats_map_fd < 0) {
 		return EXIT_FAIL_BPF;
 	}
@@ -270,6 +350,6 @@ int main(int argc, char **argv)
 		       );
 	}
 
-	stats_poll(stats_map_fd, info.type, interval);
+	stats_poll(pin_dir, stats_map_fd, &info, interval);
 	return EXIT_OK;
 }
