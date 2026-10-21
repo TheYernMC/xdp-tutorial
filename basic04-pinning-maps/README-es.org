@@ -1,0 +1,197 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Basic04 - fijación (pinning) de mapas
+#+OPTIONS: ^:nil
+
+En esta lección aprenderás a leer mapas BPF desde otro programa
+"externo".
+
+En basic03, el programa [[file:../basic03-map-counter/xdp_load_and_stats.c][xdp_load_and_stats.c]] tanto cargaba el programa
+BPF como leía las estadísticas del mapa. Esto era práctico ya que el
+descriptor de fichero del mapa estaba fácilmente disponible; sin embargo,
+a menudo resulta limitante que un mapa solo se pueda acceder desde el
+mismo programa que lo carga.
+
+En esta lección dividiremos el programa en dos programas separados:
+ - uno centrado en la carga de BPF/XDP ([[file:xdp_loader.c]]) y
+ - otro centrado en leer e imprimir estadísticas ([[file:xdp_stats.c]]).
+
+La cuestión básica gira en torno a cómo compartir u obtener el
+descriptor de fichero UNIX que apunta al mapa BPF desde un programa
+distinto al que creó el mapa.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#soluciones-a-las-tareas-de-basic03][Soluciones a las tareas de basic03]]
+- [[#lo-que-aprenderás-en-esta-lección][Lo que aprenderás en esta lección]]
+  - [[#envoltorios-de-la-syscall-bpf][Envoltorios de la syscall bpf]]
+  - [[#montando-el-sistema-de-ficheros-bpf][Montando el sistema de ficheros BPF]]
+  - [[#trampas-con-los-mapas-fijados][Trampas con los mapas fijados]]
+  - [[#eliminando-mapas-al-recargar-xdp][Eliminando mapas al recargar XDP]]
+- [[#tareas][Tareas]]
+  - [[#tarea-1-xdp_statsc-recargar-el-descriptor-de-fichero-del-mapa][Tarea 1: (xdp_stats.c) recargar el descriptor de fichero del mapa]]
+  - [[#tarea-2-xdp_loaderc-reutilizar-un-mapa-fijado][Tarea 2: (xdp_loader.c) reutilizar un mapa fijado]]
+
+* Soluciones a las tareas de basic03
+
+Las tareas de [[file:../basic03-map-counter][basic03]] se han "resuelto" o implementado en esta lección
+basic04. Por tanto, esta lección funciona como la solución de referencia
+para basic03.
+
+* Lo que aprenderás en esta lección
+
+** Envoltorios de la syscall bpf
+
+Al dividir el programa [[file:../basic03-map-counter/xdp_load_and_stats.c][xdp_load_and_stats.c]] en [[file:xdp_loader.c]] y
+[[file:xdp_stats.c]], fíjate en que xdp_stats.c ya no incluye
+=#<xdp/libxdp.h>=. Esto es porque xdp_stats no usa ninguna de las
+funciones avanzadas de "objetos" de libbpf, solo usa los envoltorios
+básicos de la syscall bpf, que libbpf también proporciona.
+
+Los envoltorios de la syscall bpf los proporciona libbpf mediante el
+fichero de include =#<bpf/bpf.h>=, que para esta configuración del
+tutorial se encuentra en
+=../libbpf/src/root/usr/include/bpf/bpf.h= (pero mira también el
+[[https://github.com/libbpf/libbpf/blob/master/src/bpf.h][bpf.h fuente en el repositorio de github de libbpf]]).
+
+El punto aquí es que libbpf mantiene los envoltorios de bajo nivel de la
+syscall bpf en ficheros separados [[https://github.com/libbpf/libbpf/blob/master/src/bpf.h][bpf.h]] y [[https://github.com/libbpf/libbpf/blob/master/src/bpf.c][bpf.c]]. Por tanto,
+podríamos reducir el tamaño de nuestro binario no enlazando con
+libbpf.a. Sin embargo, por simplicidad, en este tutorial simplemente
+enlazamos todo con la biblioteca completa.
+
+** Montando el sistema de ficheros BPF
+
+El mecanismo usado para compartir mapas BPF entre programas se llama
+/pinning/ (fijación). Lo que esto significa es que creamos un fichero
+para cada mapa bajo un sistema de ficheros especial montado en
+=/sys/fs/bpf/=. Si este sistema de ficheros no está montado, nuestros
+intentos de fijar objetos BPF fallarán, así que necesitamos asegurarnos
+de que esté montado.
+
+El comando de montaje necesario es:
+#+begin_example
+ mount -t bpf bpf /sys/fs/bpf/
+#+end_example
+
+Si has seguido el tutorial, es probable que ya lo tengas montado sin
+haberte dado cuenta. Ya que tanto 'ip' de iproute2 como nuestro
+[[file:../testenv][testenv]] lo montan automáticamente en la ubicación por defecto bajo
+=/sys/fs/bpf/=. Si no, usa el comando anterior para montarlo.
+
+** Trampas con los mapas fijados
+
+Fijar todos los mapas de un =bpf_object= usando libbpf se hace fácilmente
+con: =bpf_object__pin_maps(bpf_object, pin_dir)=, que usamos en
+=xdp_loader=.
+
+Para evitar colisiones de nombres de fichero, creamos un subdirectorio
+llamado según la interfaz en la que estamos cargando el programa BPF. La
+llamada =bpf_object__pin_maps()= de libbpf incluso gestiona la creación
+de este subdirectorio si no existe.
+
+Sin embargo, si abres [[file:xdp_loader.c]] y miras nuestra función
+=pin_maps_in_bpf_object()=, verás que, debido a casos límite, las cosas
+son un poco más complicadas. Por ejemplo, también necesitamos gestionar
+la limpieza de programas XDP anteriores que no hayan limpiado sus mapas,
+lo cual hacemos mediante =bpf_object__unpin_maps()=. Si este es el primer
+uso, entonces no deberíamos intentar "desfijar mapas", ya que eso
+fallará.
+
+Hay un caso límite que actualmente no gestionamos, a saber, el caso en
+que nuestro programa BPF se amplía con un nuevo mapa, y se carga como
+reemplazo de un programa BPF existente que no contiene este nuevo mapa.
+En este caso, =bpf_object__unpin_maps()= no encontrará el nuevo mapa para
+desvincularlo, y por tanto fallará en su operación.
+
+** Eliminando mapas al recargar XDP
+
+Al recargar el programa BPF de XDP mediante nuestro =xdp_loader=, los
+mapas fijados existentes no se reutilizan. Esto difiere del cargador BPF
+de la herramienta iproute2 (comandos =ip= y =tc=), que reutilizará los
+mapas fijados existentes, en lugar de crear mapas nuevos.
+
+Esto es una decisión de diseño, principalmente porque libbpf no tiene un
+soporte sencillo para esto, pero también porque es más fácil observar si
+nuestro programa funciona cuando los contadores se reinician a cero. Se
+puede imaginar fácilmente que, para aplicaciones reales, podría ser un
+problema que los contadores se reinicien a cero para las diferentes
+herramientas de estadísticas. Incluso para nuestro programa =xdp_stats=
+dividido, esto resulta molesto, ya que debes recordar reiniciar la
+herramienta =xdp_stats= después de recargar mediante =xdp_loader=, o de
+lo contrario estará observando el FD equivocado. (Consulta la
+[[#tarea-1-xdp_statsc-recargar-el-descriptor-de-fichero-del-mapa][Tarea 1]] para una solución alternativa)
+
+*** Reutilizando mapas con libbpf
+
+A veces quieres que varios programas XDP compartan el mismo mapa (por
+ejemplo, un mapa de estadísticas fijado en /sys/fs/bpf/…).
+La API de libbpf proporciona una forma de *reutilizar y reemplazar* el
+mapa dentro de tu objeto BPF con un mapa fijado ya existente, usando:
+
+=bpf_map__reuse_fd()=
+
+Esta llamada debe hacerse *después* de que el objeto se haya abierto con
+=bpf_object__open()= pero *antes* de que se cargue con
+=bpf_object__load()=.
+
+Cuando se usan las APIs de programa XDP de más alto nivel:
+
+- =xdp_program__create()= → llama internamente a =bpf_object__open()=
+- =xdp_program__attach()= → llama internamente a =bpf_object__load()=
+
+Por tanto, necesitas inyectar el paso =bpf_map__reuse_fd()= entre medias,
+obteniendo el =bpf_object= subyacente a partir del programa XDP.
+
+Aquí tienes un ejemplo mínimo:
+
+#+begin_src C
+struct xdp_program *prog;
+struct bpf_object *bpf_obj;
+struct bpf_map *map;
+int pinned_map_fd;
+
+/* 1. Create program (opens bpf_object) */
+prog = xdp_program__create(&xdp_opts);
+
+/* 2. Access the underlying bpf_object */
+bpf_obj = xdp_program__bpf_obj(prog);
+
+/* 3. Look up the map in the object */
+map = bpf_object__find_map_by_name(bpf_obj, "xdp_stats_map");
+
+/* 4. Get FD of the pinned map */
+pinned_map_fd = bpf_obj_get("/sys/fs/bpf/veth0/xdp_stats_map");
+
+/* 5. Reuse pinned FD instead of creating a new map */
+bpf_map__reuse_fd(map, pinned_map_fd);
+
+/* 6. Now attach program (this will load the object) */
+xdp_program__attach(prog, ifindex, attach_mode, 0);
+#+end_src
+
+(Pista: mira la [[#tarea-2-xdp_loaderc-reutilizar-un-mapa-fijado][Tarea 2]])
+
+* Tareas
+
+** Tarea 1: (xdp_stats.c) recargar el descriptor de fichero del mapa
+
+Como se mencionó arriba, la herramienta =xdp_stats= no detectará si
+=xdp_loader= carga nuevos mapas y nuevos programas BPF, y necesitará
+reiniciarse. Esto es molesto. La *tarea* es recargar el descriptor de
+fichero del mapa dinámicamente, de forma que el programa =xdp_stats= no
+necesite reiniciarse.
+
+Hay varias soluciones a esto. La solución ingenua es reabrir el fichero
+del mapa fijado cada vez; pero ¿cómo detectas que el fichero ha cambiado?
+Si no detectas cuándo estás tratando con un mapa nuevo, la diferencia de
+estadísticas entre dos mediciones será negativa. Piensa en soluciones en
+las que recuerdes/uses el número de ID para detectar cambios, ya sea
+mediante el ID del mapa o el ID del programa BPF de XDP.
+
+** Tarea 2: (xdp_loader.c) reutilizar un mapa fijado
+
+Como se mencionó arriba, libbpf puede reutilizar y reemplazar un mapa con
+un mapa existente.
+
+La *tarea* es comprobar en [[file:xdp_loader.c][xdp_loader]] si ya existe una versión fijada
+del mapa "xdp_stats_map" y usar la API =bpf_map__reuse_fd()= de libbpf
+para reutilizarla, en lugar de crear un mapa nuevo.
