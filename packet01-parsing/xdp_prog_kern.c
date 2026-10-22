@@ -36,7 +36,17 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
 	/* Byte-count bounds check; check if current pointer + size of header
 	 * is after data_end.
 	 */
-	if (nh->pos + 1 > data_end)
+	/*
+	 * Esta solución es correcta pero por lo que he entendido es más natural la segunda
+	 */
+	if (nh->pos + hdrsize > data_end)
+		return -1;
+
+	/*
+	 * Esto es más natural porque el compilador entiende que avanzar +1 en un puntero tipado
+	 * (este caso: struct ethhdr) es avanzar el sizeof(*eth) (el tamaño del tipo de la variable a la que apunta)
+	 */
+	if (eth + 1 > data_end)
 		return -1;
 
 	nh->pos += hdrsize;
