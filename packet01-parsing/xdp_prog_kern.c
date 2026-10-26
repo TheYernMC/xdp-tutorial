@@ -17,6 +17,20 @@ struct hdr_cursor {
 	void *pos;
 };
 
+/* Assignment 4 definitions */
+#define VLAN_MAX_DEPTH 4
+
+struct vlan_hdr {
+	__be16	h_vlan_TCI;
+	__be16	h_vlan_encapsulated_proto;
+};
+
+static __always_inline int proto_is_vlan(__u16 h_proto)
+{
+        return !!(h_proto == bpf_htons(ETH_P_8021Q) ||
+                  h_proto == bpf_htons(ETH_P_8021AD));
+}
+
 /* Packet parsing helpers.
  *
  * Each helper parses a packet header, including doing bounds checking, and
@@ -52,7 +66,28 @@ static __always_inline int parse_ethhdr(struct hdr_cursor *nh,
 	nh->pos += hdrsize;
 	*ethhdr = eth;
 
-	return eth->h_proto; /* network-byte-order */
+	/* Assignment 4 */ //Lo copie de la solución al final, esta es muy elegante.
+	struct vlan_hdr *vlan = nh->pos;
+	__u16 h_proto = eth->h_proto;
+
+	#pragma unroll
+
+	for(int i = 0; i < VLAN_MAX_DEPTH; i++)
+	{
+		if(!proto_is_vlan(h_proto))
+			break;
+		
+		if(vlan + 1 > data_end)
+			break;
+
+		h_proto = vlan->h_vlan_encapsulated_proto;
+		vlan++;
+	}
+
+	nh->pos = vlan;
+	/* END Assignment 4 */
+
+	return h_proto; /* network-byte-order */
 }
 
 /* Assignment 2: Implement and use this */
