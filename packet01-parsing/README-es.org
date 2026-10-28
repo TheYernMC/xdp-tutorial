@@ -1,0 +1,434 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Packet01 - análisis (parsing) de paquetes
+#+OPTIONS: ^:nil
+
+Ahora que has completado los pasos básicos del tutorial, estás preparado
+para empezar a escribir programas de procesamiento de paquetes. Esta
+lección contiene la primera introducción al procesamiento de paquetes, en
+la que veremos cómo analizar el contenido de un paquete y cómo asegurarnos
+de que el verificador del kernel acepte tus programas.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#notas-de-configuración][Notas de configuración]]
+- [[#lo-que-aprenderás-en-esta-lección][Lo que aprenderás en esta lección]]
+  - [[#los-punteros-data-y-data_end][Los punteros data y data_end]]
+  - [[#comprobación-de-límites-del-paquete][Comprobación de límites del paquete]]
+  - [[#cursor-de-cabecera-para-seguir-la-posición-actual-de-análisis][Cursor de cabecera para seguir la posición actual de análisis]]
+  - [[#códigos-de-retorno-del-programa][Códigos de retorno del programa]]
+  - [[#definiciones-de-cabeceras-de-paquetes-y-orden-de-bytes][Definiciones de cabeceras de paquetes y orden de bytes]]
+  - [[#inlining-de-funciones-y-desenrollado-de-bucles][Inlining de funciones y desenrollado de bucles]]
+- [[#tareas][Tareas]]
+  - [[#tarea-1-corregir-el-error-de-comprobación-de-límites][Tarea 1: Corregir el error de comprobación de límites]]
+  - [[#tarea-2-analizar-la-cabecera-ip][Tarea 2: Analizar la cabecera IP]]
+  - [[#tarea-3-analizar-la-cabecera-icmpv6-y-reaccionar-a-ella][Tarea 3: Analizar la cabecera ICMPv6 y reaccionar a ella]]
+  - [[#tarea-4-añadir-soporte-para-vlan][Tarea 4: Añadir soporte para VLAN]]
+  - [[#tarea-5-añadir-soporte-para-ipv4][Tarea 5: Añadir soporte para IPv4]]
+
+* Notas de configuración
+
+Usaremos el cargador (loader) de xdp-tools. El Makefile de este directorio
+contiene una regla para copiarlo a este directorio, de modo que puedes
+ejecutarlo como =./xdp-loader= después de ejecutar =make=. El script
+=testenv.sh= lo usará cuando se ejecute con el comando =load=. En el
+ejemplo de abajo suponemos que has instalado el alias de testenv
+(ejecutando =eval $(./testenv.sh alias)=), así que todos los ejemplos usan
+el comando corto =t= para referirse al script =testenv.sh=.
+
+* Lo que aprenderás en esta lección
+
+Esta lección te enseñará a analizar los datos de un paquete desde XDP. Esto
+se hace mediante acceso directo a memoria usando punteros a los datos del
+paquete, que es una de las razones del alto rendimiento que se puede
+alcanzar con XDP. Esto funciona porque el verificador del kernel comprueba
+que todos los accesos a datos estén dentro de los límites del paquete.
+Veremos cómo funciona esto y cómo puedes lidiar con los errores del
+verificador.
+
+También aprenderás a decidir el veredicto del paquete mediante el código de
+retorno del programa en función de los datos del paquete, y veremos cómo
+estructurar el código de análisis de paquetes para garantizar su
+legibilidad y su reutilización.
+
+A continuación se enumeran algunos puntos a tener en cuenta mientras
+completas las tareas.
+
+** Los punteros data y data_end
+Cuando se ejecuta un programa XDP, recibe como parámetro un puntero a un
+objeto =struct xdp_md=, que contiene información de contexto sobre el
+paquete. Este objeto está definido en =bpf.h= de la siguiente manera:
+
+#+begin_src C
+struct xdp_md {
+	__u32 data;
+	__u32 data_end;
+	__u32 data_meta;
+	/* Below access go through struct xdp_rxq_info */
+	__u32 ingress_ifindex; /* rxq->dev->ifindex */
+	__u32 rx_queue_index;  /* rxq->queue_index  */
+};
+#+end_src
+
+Los dos últimos elementos de este struct son simplemente campos de datos que
+contienen el ifindex y el índice de la cola RX por la que se recibió el
+paquete. El programa puede usarlos en su toma de decisiones (junto con los
+propios datos del paquete).
+
+Los tres primeros elementos son en realidad punteros, aunque estén
+definidos con el tipo =__u32=. El campo =data= apunta al inicio del
+paquete, el campo =data_end= apunta al final, y el campo =data_meta= apunta
+al área de metadatos que los programas XDP pueden usar para almacenar
+metadatos adicionales que acompañen al paquete. En esta lección solo
+trabajaremos con los campos =data= y =data_end=.
+
+El verificador reescribirá los accesos a estos punteros al cargar el
+programa para que apunten a los datos reales del paquete. Pero para
+satisfacer la comprobación de tipos del compilador, necesitamos convertir
+(cast) los campos a punteros al acceder a ellos. Por esta razón, los
+programas XDP suelen empezar con una asignación como esta:
+
+#+begin_src C
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+#+end_src
+
+** Comprobación de límites del paquete
+
+Como se ha mencionado arriba, a los datos del paquete se accede mediante
+lecturas directas de memoria, cuya seguridad garantiza el verificador. Sin
+embargo, hacer esto en tiempo de ejecución para cada acceso a puntero
+supondría una sobrecarga de rendimiento significativa. Así que, en su
+lugar, lo que hace el verificador es comprobar que el programa XDP realiza
+su propia comprobación de límites; ese es el propósito del puntero
+=data_end=.
+
+Cuando el verificador realiza su análisis estático en tiempo de carga,
+sigue todos los desplazamientos (offsets) de direcciones de memoria que usa
+el programa y busca comparaciones con el puntero =data_end=, que en tiempo
+de ejecución apuntará al final del paquete. Esto significa que si el
+programa hace algo como esto:
+
+#+begin_src C
+if (data + 10 < data_end)
+  /* do something with the first 10 bytes of data */
+else
+  /* skip the packet access */
+#+end_src
+
+El verificador puede saber que todas las instrucciones de la rama =true= de
+la sentencia =if= pueden acceder de forma segura a los primeros 10 bytes
+del paquete, mientras que la rama =else= no. Así que si un programa intenta
+acceder a los datos del paquete en la rama else, el programa será
+rechazado.
+
+** Cursor de cabecera para seguir la posición actual de análisis
+
+Al recorrer un paquete y analizar las cabeceras sucesivas, generalmente es
+necesario llevar la cuenta de la posición actual de análisis. Cuando se usan
+funciones auxiliares para analizar las cabeceras del paquete, esas
+funciones generalmente necesitan modificar la posición actual del
+analizador. Para evitar tener que lidiar con aritmética de punteros sobre
+punteros a punteros, encapsulamos esto en un objeto /cursor/, que podemos
+pasar a las funciones auxiliares. El cursor se define simplemente como un
+struct de un único campo:
+
+#+begin_src C
+/* Header cursor to keep track of current parsing position */
+struct hdr_cursor {
+	void *pos;
+};
+#+end_src
+
+** Códigos de retorno del programa
+
+El veredicto final sobre lo que ocurre con un paquete después de haber sido
+procesado por el programa XDP se comunica al kernel mediante el código de
+retorno del programa. Estos también están definidos en =bpf.h=:
+
+#+begin_src C
+enum xdp_action {
+	XDP_ABORTED = 0,
+	XDP_DROP,
+	XDP_PASS,
+	XDP_TX,
+	XDP_REDIRECT,
+};
+#+end_src
+
+=ABORTED= y =DROP= descartan el paquete, pero =ABORTED= además dispara un
+evento de tracepoint (=xdp:xdp_exception=; esto no tiene ninguna sobrecarga
+cuando no se alcanza el tracepoint). =PASS= permite que el paquete continúe
+hacia la pila de red del kernel para su procesamiento, =TX= retransmite el
+paquete por la misma interfaz por la que se recibió, y =REDIRECT= transmite
+el paquete por otra interfaz (donde la interfaz de destino debe
+establecerse mediante una llamada a un helper de BPF antes de devolver
+=REDIRECT=).
+
+Ten en cuenta que el programa XDP puede realizar modificaciones arbitrarias
+en los paquetes antes de emitir estos veredictos. Para las acciones =TX= y
+=REDIRECT=, generalmente es necesaria alguna transformación de los datos del
+paquete (como reescribir las direcciones de la cabecera Ethernet), mientras
+que para las demás es opcional. Veremos cómo se puede usar esto en la
+siguiente lección.
+
+** Definiciones de cabeceras de paquetes y orden de bytes
+
+Como un programa XDP solo recibe un puntero a un búfer de datos en bruto,
+tiene que hacer su propio análisis de las cabeceras del paquete. Para
+ayudar en esto, las cabeceras del kernel definen structs que contienen los
+campos de las cabeceras de los paquetes. Analizar paquetes generalmente
+implica muchas conversiones (casts) de búferes de datos a los tipos de
+struct adecuados, como veremos en las tareas de abajo. Las definiciones de
+cabeceras que usaremos en esta lección son las siguientes:
+
+| Struct            | Fichero de cabecera  |
+|-------------------+----------------------|
+| =struct ethhdr=   | =<linux/if_ether.h>= |
+| =struct ipv6hdr=  | =<linux/ipv6.h>=     |
+| =struct iphdr=    | =<linux/ip.h>=       |
+| =struct icmp6hdr= | =<linux/icmpv6.h>=   |
+| =struct icmphdr=  | =<linux/icmp.h>=     |
+
+Como los datos del paquete vienen directamente del cable, los campos de
+datos estarán en orden de bytes de red (network byte order). Usa las
+funciones =bpf_ntohs()= y =bpf_htons()= para convertir desde y hacia el
+orden de bytes del host, respectivamente. Consulta el comentario al
+principio de [[https://github.com/libbpf/libbpf/blob/fbd60dbff51c870f5e80a17c4f2fd639eb80af90/src/bpf_endian.h][bpf_endian.h]] para saber por qué se necesitan las versiones
+con el prefijo =bpf_=.
+
+** Inlining de funciones y desenrollado de bucles
+
+Como los programas eBPF solo tienen un soporte limitado para llamadas a
+funciones, las funciones auxiliares deben insertarse en línea (inline) en
+la función principal. El marcador =__always_inline= en la definición de la
+función garantiza esto, anulando cualquier decisión de inlining que el
+compilador tomaría en otro caso.
+
+Antes de
+[[https://github.com/torvalds/linux/commit/2589726d12a1b12eaaa93c7f1ea64287e383c7a5][v5.3]],
+como eBPF no admitía bucles, necesitábamos desenrollar cualquier bucle del
+programa. Esto se puede hacer añadiendo la sentencia =#pragma unroll= en la
+línea anterior al bucle, y solo funciona con bucles cuyo número de
+iteraciones se conoce en tiempo de compilación (como bucles for con un
+contador estático). Desde v5.3, el verificador puede determinar si un bucle
+terminará o no. Desde entonces se han implementado varios helpers
+adicionales para bucles. Los detalles se pueden consultar en la
+[[https://docs.ebpf.io/linux/concepts/loops/][documentación de eBPF (eBPF Docs)]].
+
+* Tareas
+
+El objetivo final de esta lección es construir un programa XDP que
+inspeccione las cabeceras de los paquetes y descarte uno de cada dos
+paquetes ICMP echo request (es decir, ping) vistos en la interfaz,
+permitiendo que todo lo demás pase al kernel. Las tareas de abajo irán
+avanzando gradualmente hacia este objetivo.
+
+El punto de partida de esta tarea es el programa de análisis de paquetes de
+[[file:xdp_prog_kern.c]], que analiza la cabecera Ethernet del paquete usando
+una función auxiliar. Cada tarea ampliará este programa añadiendo nuevas
+funcionalidades. El programa incluye el helper de estadísticas de basic04,
+que puedes usar para monitorizar qué acciones toma el programa mientras lo
+desarrollas. Usa =t stats= para ejecutar la aplicación de monitorización
+de estadísticas (después de haber cargado tu programa BPF).
+
+** Tarea 1: Corregir el error de comprobación de límites
+La función de análisis de =xdp_prog_kern.c= analiza la cabecera Ethernet,
+hace la comprobación de límites y devuelve el tipo y la posición de la
+siguiente cabecera. Sin embargo, hay un fallo en la lógica de comprobación
+de límites, por lo que el verificador rechazará el programa (compruébalo
+ejecutando =t load= después de compilarlo).
+
+Tu primera tarea es corregir este fallo (*pista*: está en la sentencia =if=
+de =parse_ethhdr()=) y asegurarte de que el programa se puede cargar
+correctamente en una interfaz.
+
+** Tarea 2: Analizar la cabecera IP
+
+Ahora que nuestro programa de análisis de Ethernet funciona, añadiremos el
+análisis de la cabecera IP. Para ello, implementa la función
+=parse_ip6hdr()=, cuyo prototipo está comentado debajo de la función
+=parse_ethhdr()=. La función será bastante similar a =parse_ethhdr()=, pero
+tendrás que buscar la definición de la estructura de la cabecera IPv6 en
+=ipv6.h=.
+
+Cuando añadas la comprobación de límites, fíjate en que el estilo usado en
+=parse_ethhdr()=, que calcula el tamaño de la cabecera y hace una
+comparación byte a byte, no es el único posible. También puedes usar una
+comparación al estilo de la aritmética de punteros, que aprovecha el hecho
+de que incrementar un puntero desplaza la memoria a la que apunta en el
+tamaño de la estructura. Usando esto obtendrás una comprobación de límites
+como esta:
+
+#+begin_src C
+	struct ipv6hdr *ip6h = nh->pos;
+
+	/* Pointer-arithmetic bounds check; pointer +1 points to after end of
+	 * thing being pointed to. We will be using this style in the remainder
+	 * of the tutorial.
+	 */
+	if (ip6h + 1 > data_end)
+		return -1;
+#+end_src
+
+No olvides incrementar también el puntero nh->pos para que apunte a los
+datos justo después de la cabecera IP, que es lo que examinarás al analizar
+la cabecera ICMPv6 en la siguiente tarea.
+
+Para comprobar que tu programa funciona, verifica que compila y se carga.
+También puedes cambiar el código de retorno para descartar los paquetes IP
+y comprobar que funciona usando =t tcpdump= o =t ping=.
+
+** Tarea 3: Analizar la cabecera ICMPv6 y reaccionar a ella
+
+Ahora que podemos analizar correctamente los paquetes hasta la cabecera IP,
+necesitamos añadir el análisis de la carga útil (payload) que nos interesa,
+es decir, la cabecera ICMPv6. Para ello, implementa la función
+=parse_icmp6hdr()=.
+
+Después de analizar la cabecera ICMPv6, por fin es momento de tomar
+nuestras decisiones en función de la carga útil del paquete. En este caso,
+nos interesa el número de secuencia. La estructura de datos está bastante
+anidada, pero el fichero de cabecera también define un alias práctico, de
+modo que se puede acceder al número de secuencia como
+=icmp6h->icmp6_sequence= (pero no olvides la conversión del orden de
+bytes).
+
+Con esto podemos, por fin, implementar la lógica de descarte mencionada
+arriba, simplemente devolviendo =XDP_DROP= si el número de secuencia es par,
+y =XDP_PASS= en caso contrario. Verifica que funciona cargando el programa y
+ejecutando un ping; deberías ver respuestas en uno de cada dos números de
+secuencia:
+
+#+begin_src sh
+$ make
+$ t load
+$ t ping
+Running ping from inside test environment:
+
+PING fc00:dead:cafe:1::1(fc00:dead:cafe:1::1) 56 data bytes
+64 bytes from fc00:dead:cafe:1::1: icmp_seq=1 ttl=64 time=0.059 ms
+64 bytes from fc00:dead:cafe:1::1: icmp_seq=3 ttl=64 time=0.135 ms
+^C
+--- fc00:dead:cafe:1::1 ping statistics ---
+4 packets transmitted, 2 received, 50% packet loss, time 44ms
+rtt min/avg/max/mdev = 0.059/0.097/0.135/0.038 ms
+#+end_src
+
+** Tarea 4: Añadir soporte para VLAN
+
+Ahora que tenemos la funcionalidad básica funcionando, podemos mejorarla
+para que también maneje correctamente las etiquetas VLAN de los paquetes
+Ethernet, como ejemplo de cómo analizar múltiples cabeceras variables en
+función de la carga útil. En Linux, las VLAN se configuran creando
+interfaces virtuales de tipo vlan; pero como el programa XDP se ejecuta
+directamente sobre la interfaz real, verá todos los paquetes con sus
+etiquetas VLAN, antes de que el kernel los asigne a las interfaces VLAN
+virtuales. Podemos aprovechar esto para crear un analizador que funcione con
+cualquier encapsulación VLAN (pero consulta la nota sobre la descarga en
+hardware más abajo).
+
+Por ahora solo queremos analizar las etiquetas VLAN y encontrar la cabecera
+IP encapsulada (en la siguiente lección pasaremos a añadir y eliminar
+etiquetas VLAN). Esto significa que podemos simplemente ampliar nuestra
+función =parse_ethhdr()= para que también analice etiquetas VLAN. Si se
+encuentra alguna etiqueta, simplemente tomamos el tipo de la siguiente
+cabecera de la etiqueta más interna en lugar de directamente de la cabecera
+Ethernet, y movemos el puntero nexthdr a después del final de la etiqueta
+VLAN.
+
+Desafortunadamente, la cabecera de la etiqueta VLAN no la exporta ninguno de
+los ficheros de cabecera de IP. Sin embargo, es bastante sencilla, así que
+podemos definirla nosotros mismos, así (copiada de las cabeceras internas
+del kernel):
+
+#+begin_src C
+struct vlan_hdr {
+	__be16	h_vlan_TCI;
+	__be16	h_vlan_encapsulated_proto;
+};
+#+end_src
+
+El ethertype de una etiqueta VLAN es =ETH_P_8021Q= o =ETH_P_8021AD=, ambos
+definidos en =if_ether=. Así que podemos definir una función auxiliar
+sencilla para comprobar si hay una etiqueta VLAN presente:
+
+#+begin_src C
+static __always_inline int proto_is_vlan(__u16 h_proto)
+{
+        return !!(h_proto == bpf_htons(ETH_P_8021Q) ||
+                  h_proto == bpf_htons(ETH_P_8021AD));
+}
+#+end_src
+
+Que se puede usar así:
+
+#+begin_src C
+if (proto_is_vlan(eth->h_proto)) {
+  /* Process VLAN tag */
+}
+#+end_src
+
+Otra cosa a tener en cuenta es que un mismo paquete puede tener varias
+etiquetas VLAN anidadas. Podemos manejar esto usando un bucle desenrollado
+para analizar las cabeceras VLAN sucesivas, mientras su protocolo
+encapsulado siga siendo uno de los tipos VLAN.
+
+Usando lo anterior, modifica tu programa de análisis para que también
+funcione con etiquetas VLAN. Puedes probarlo configurando el entorno de
+pruebas con interfaces VLAN; simplemente pasa la opción =--vlan= a =t
+setup=, o ejecuta =t reset --vlan= para reinicializar un entorno existente
+añadiendo una interfaz VLAN. Una vez que hayas inicializado el entorno para
+incluir VLAN, puedes ejecutar =t ping --vlan= para hacer ping sobre las
+interfaces VLAN y verificar que se sigue descartando uno de cada dos
+paquetes.
+
+*** Una nota sobre la descarga (offload) de VLAN
+
+Como XDP necesita ver las cabeceras VLAN como parte de las cabeceras del
+paquete, es importante desactivar la descarga de VLAN en hardware (VLAN
+hardware offload, que admiten la mayoría de las NIC físicas), ya que esta
+elimina la etiqueta VLAN de la cabecera del paquete y en su lugar la
+comunica al kernel fuera de banda a través del descriptor hardware del
+paquete. El script =testenv= ya desactiva la descarga de VLAN al configurar
+el entorno, pero como referencia, así es como se desactiva para otros
+dispositivos usando ethtool:
+
+#+begin_example
+ # Comprobar la configuración actual:
+ ethtool -k DEV | grep vlan-offload
+ # Desactivar tanto para RX como para TX
+ ethtool --offload DEV rxvlan off txvlan off
+ # Equivalente a:
+ # ethtool -K DEV rxvlan off txvlan off
+#+end_example
+
+
+
+** Tarea 5: Añadir soporte para IPv4
+
+Aunque obviamente a todos nos gustaría que IPv6 estuviera en todas partes, a
+veces sigue siendo necesario manejar paquetes IPv4 heredados (legacy). Con
+este fin, la tarea final de esta lección es ampliar nuestro programa para
+que haga con los paquetes ICMP de v4 lo mismo que hace con los paquetes
+ICMPv6. Esto implica añadir dos nuevas funciones de análisis para las
+cabeceras IPv4 y manejar cada una según el tipo de carga útil de la
+cabecera Ethernet.
+
+Esto debería ser una ampliación bastante directa del programa. La única
+complicación a tener en cuenta es que las cabeceras IPv4 pueden variar de
+tamaño, así que tendrás que hacer la comprobación de límites en dos pasos:
+primero verifica que el propio struct iphdr cabe en la carga útil del
+paquete, luego calcula el tamaño real de la cabecera como
+=hdrsize = iph->ihl * 4= y, finalmente, verifica que este tamaño completo cabe en el
+paquete (y ajusta el puntero nexthdr en consecuencia).
+
+Para probar el soporte de IPv4, puedes ejecutar =t setup --legacy-ip=, que
+configurará direcciones IPv4 en las interfaces virtuales, y después =t ping
+--legacy-ip= para hacer un ping. Ten en cuenta que tendrás que pasar tanto
+=--legacy-ip= como =--vlan= a los comandos =setup= (o =reset=) si quieres
+ambas cosas a la vez; sin embargo, no se configurarán direcciones IPv4 en
+las interfaces VLAN, así que no puedes usar =t ping= con ambas.
+
+Una vez que hayas añadido el soporte para IPv4 y verificado que se descarta
+uno de cada dos paquetes ICMP de v4 al cargar el programa, habrás
+completado esta lección y estarás preparado para pasar a =packet02= y
+aprender sobre la modificación de paquetes.
