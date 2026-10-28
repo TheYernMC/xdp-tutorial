@@ -1,0 +1,137 @@
+# -*- fill-column: 76; -*-
+#+TITLE: Tutorial: Packet02 - reescritura de paquetes
+#+OPTIONS: ^:nil
+
+Tras completar la lección de análisis de paquetes en packet01, ya sabes
+cómo estructurar el análisis de paquetes, cómo asegurarte de hacer una
+comprobación de límites adecuada antes de acceder a los datos del paquete y
+cómo decidir el veredicto final del paquete con los códigos de retorno. En
+esta lección partimos de ahí para mostrar cómo modificar el contenido de
+los paquetes.
+
+* Tabla de Contenidos                                                   :TOC:
+- [[#lo-que-aprenderás-en-esta-lección][Lo que aprenderás en esta lección]]
+  - [[#reescribir-datos-del-paquete-con-acceso-directo-a-memoria][Reescribir datos del paquete con acceso directo a memoria]]
+  - [[#aumentar-y-reducir-el-tamaño-del-paquete][Aumentar y reducir el tamaño del paquete]]
+- [[#tareas][Tareas]]
+  - [[#tarea-1-reescribir-los-números-de-puerto][Tarea 1: Reescribir los números de puerto]]
+  - [[#tarea-2-eliminar-la-etiqueta-vlan-más-externa][Tarea 2: Eliminar la etiqueta VLAN más externa]]
+  - [[#tarea-3-volver-a-añadir-una-etiqueta-vlan-que-falta][Tarea 3: Volver a añadir una etiqueta VLAN que falta]]
+
+* Lo que aprenderás en esta lección
+
+** Reescribir datos del paquete con acceso directo a memoria
+
+Como vimos en la lección anterior, el verificador comprueba que todos los
+accesos a memoria sobre los datos del paquete hagan primero una
+comprobación de límites correcta, para asegurarse de que no se accede a
+memoria fuera del paquete. Esto se aplica no solo a las lecturas de datos
+del paquete, sino también a las escrituras; lo que significa que podemos
+reescribir los datos del paquete simplemente cambiando la memoria que
+ocupan. Usaremos esto en las tareas de abajo para modificar campos de las
+cabeceras de los paquetes.
+
+** Aumentar y reducir el tamaño del paquete
+
+Aunque se pueden conseguir muchas cosas simplemente reescribiendo los datos
+existentes del paquete, a veces es necesario añadir o eliminar por completo
+fragmentos de memoria, por ejemplo para realizar una encapsulación o para
+quitar cabeceras de protocolo de un paquete. El kernel expone una función
+auxiliar de eBPF para lograrlo, llamada =bpf_xdp_adjust_head()=. Esta
+función recibe como parámetros el objeto de contexto XDP y un tamaño de
+ajuste, y desplaza el puntero de cabecera esa cantidad de bytes (es decir,
+un número positivo reducirá el tamaño de los datos del paquete, mientras
+que un número negativo añadirá esa cantidad de bytes al principio del
+paquete).
+
+Hay algunas cosas a tener en cuenta al usar este helper:
+
+1. Primero, puede fallar, bien porque el ajuste dejaría los datos del
+   paquete demasiado pequeños para contener al menos una cabecera Ethernet,
+   o bien porque no hay suficiente espacio en memoria antes del inicio del
+   paquete (los datos del paquete se colocan a un desplazamiento fijo desde
+   el inicio de la página de memoria).
+
+2. Segundo, el helper solo ajusta el puntero de datos. Es responsabilidad
+   del programa XDP asegurarse de que los datos del paquete sean válidos
+   después. Esto normalmente implica reescribir la cabecera Ethernet en la
+   nueva posición de inicio del paquete y ajustar los campos de las
+   cabeceras siguientes para que concuerden.
+
+3. Finalmente, el verificador descarta toda la información sobre las
+   comprobaciones de límites anteriores después de que se haya ajustado el
+   tamaño del paquete. Esto significa que el programa XDP necesita realizar
+   nuevas comprobaciones de límites *incluida la reevaluación de los
+   punteros data y data_end* después de ajustar el tamaño del paquete.
+
+También existe =bpf_xdp_adjust_tail()=, que se puede usar para mover el
+final de los datos del paquete. A partir del kernel v5.8 funciona de forma
+idéntica a =bpf_xdp_adjust_head()=; antes de eso solo era posible reducir
+el paquete por el final, no aumentarlo.
+
+* Tareas
+
+En esta lección crearemos dos programas: uno que reescribe el número de
+puerto de destino de los paquetes TCP y UDP para que sea uno menos que el
+original, y otro que elimina la cabecera de encapsulación VLAN más externa
+si existe, o añade una nueva si no existe.
+
+** Tarea 1: Reescribir los números de puerto
+
+Para esta tarea tendrás que analizar las cabeceras TCP y UDP y reescribir el
+número de puerto antes de dejar pasar el paquete. Estas cabeceras están
+definidas en =<linux/tcp.h>= y =<linux/udp.h>=, respectivamente.
+
+Reescribir consiste simplemente en escribir en el campo adecuado de la
+cabecera (después de analizarla). Por ejemplo:
+
+#+begin_src C
+udphdr->dest = bpf_htons(bpf_ntohs(udphdr->dest) - 1);
+#+end_src
+
+Puedes usar =tcpdump= para verificar que funciona. Como generador de
+paquetes puedes usar la utilidad =socat=. Lo siguiente generará un paquete
+UDP al puerto 2000 por cada línea que escribas en stdin:
+
+#+begin_example
+$ t exec -- socat - 'udp6:[fc00:dead:cafe:1::1]:2000'
+#+end_example
+
+Puedes verlos con =tcpdump=:
+
+#+begin_example
+$ t tcpdump
+tcpdump: verbose output suppressed, use -v or -vv for full protocol decode
+listening on xdptut-3c93, link-type EN10MB (Ethernet), capture size 262144 bytes
+12:54:31.085948 d2:9e:c0:4f:3b:7b > 32:71:5a:a4:74:c1, ethertype IPv6 (0x86dd), length 67: fc00:dead:cafe:1::2.35126 > fc00:dead:cafe:1::1.2000: UDP, length 5
+#+end_example
+
+Cuando tu programa funcione correctamente, el puerto de destino (el 2000
+cerca del final de la línea) debería ser 1999.
+
+** Tarea 2: Eliminar la etiqueta VLAN más externa
+
+En esta tarea empezaremos a implementar el programa que elimina la etiqueta
+VLAN más externa si existe. Para ello, completa la función =vlan_tag_pop()=
+cuyo prototipo está en [[file:xdp_prog_kern.c]]. El prototipo de la función
+contiene las definiciones de variables y los comentarios en línea de
+nuestra solución al problema, para guiarte en la implementación.
+
+Una vez que hayas implementado la función, comprueba que funciona
+configurando un entorno de pruebas con VLAN activadas (como en la lección
+anterior) y ejecuta =t ping --vlan= en una ventana mientras observas la
+salida de =t tcpdump= en otra. No deberías ver etiquetas VLAN en los
+paquetes echo request; las respuestas echo reply seguirán teniendo
+etiquetas VLAN, porque el kernel responderá al ping aunque vaya dirigido a
+otra interfaz, y las respuestas se encaminarán por la interfaz que
+realmente tiene la dirección IP a la que se hace ping (es decir, la
+interfaz VLAN virtual).
+
+** Tarea 3: Volver a añadir una etiqueta VLAN que falta
+
+En esta tarea implementaremos lo contrario de la anterior, es decir, el
+código que añade una etiqueta VLAN si no existe ninguna. Simplemente fija
+en el código (hardcode) el ID de VLAN a un valor de tu elección, y prueba el
+programa de la misma forma que en la tarea anterior (pero ejecuta =t ping=
+sin el parámetro =--vlan=, y verifica que a los paquetes ICMP echo request
+se les añade efectivamente una etiqueta VLAN).
