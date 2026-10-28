@@ -11,6 +11,15 @@
 #include "../common/xdp_stats_kern_user.h"
 #include "../common/xdp_stats_kern.h"
 
+/* RFC 1624, ec. 3:  C' = ~(~C + ~m + m') */
+static __always_inline __u16 csum_replace2(__u16 check, __be16 old, __be16 new)
+{
+	__u32 sum = (__u16)~check + (__u16)~old + (__u16)new;
+	sum = (sum & 0xffff) + (sum >> 16);
+	sum = (sum & 0xffff) + (sum >> 16);
+	return (__u16)~sum;
+}
+
 /* Pops the outermost VLAN tag off the packet. Returns the popped VLAN ID on
  * success or -1 on failure.
  */
@@ -57,7 +66,53 @@ static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 SEC("xdp")
 int xdp_port_rewrite_func(struct xdp_md *ctx)
 {
-	return XDP_PASS;
+	void *data_end = (void *)(long)ctx->data_end;
+	void *data = (void *)(long)ctx->data;
+	struct hdr_cursor nh = { .pos = data };
+	__u32 action = XDP_PASS;
+	int eth_type, ip_type;
+	struct ethhdr *eth;
+	struct iphdr *iph;
+	struct ipv6hdr *ip6h;
+	struct udphdr *udph;
+	struct tcphdr *tcph;
+
+	/* L2 */
+	eth_type = parse_ethhdr(&nh, data_end, &eth);
+
+	/* L3: las dos ramas dejan el protocolo de transporte en ip_type */
+	if (eth_type == bpf_htons(ETH_P_IP))
+		ip_type = parse_iphdr(&nh, data_end, &iph);
+	else if (eth_type == bpf_htons(ETH_P_IPV6))
+		ip_type = parse_ip6hdr(&nh, data_end, &ip6h);
+	else
+		goto out;               // no es IP -> pasa sin tocar
+
+	/* L4: aquí es donde se reescribe */
+	if (ip_type == IPPROTO_UDP) {
+		if (parse_udphdr(&nh, data_end, &udph) < 0)
+			goto out;
+
+		__be16 old = udph->dest;
+		udph->dest = bpf_htons(bpf_ntohs(old) - 1);
+		if (udph->check)   /* en UDP/IPv4, check == 0 significa "sin checksum": no lo toques */
+			udph->check = csum_replace2(udph->check, old, udph->dest);
+
+
+	} else if (ip_type == IPPROTO_TCP) {
+		if (parse_tcphdr(&nh, data_end, &tcph) < 0)
+			goto out;
+
+		/* lo mismo con tcph->dest */
+		__be16 old = tcph->dest;
+		tcph->dest = bpf_htons(bpf_ntohs(old) - 1);
+		tcph->check = csum_replace2(tcph->check, old, tcph->dest);
+
+	}
+	/* cualquier otro protocolo: no entra en ninguna rama y pasa sin tocar */
+
+out:
+	return xdp_stats_record_action(ctx, action);
 }
 
 /* VLAN swapper; will pop outermost VLAN tag if it exists, otherwise push a new
