@@ -4,6 +4,8 @@
 #include <linux/in.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
+#include <linux/ip.h>
+#include <linux/icmp.h>
 #include <linux/ipv6.h>
 #include <linux/icmpv6.h>
 #include <bpf/bpf_helpers.h>
@@ -104,6 +106,7 @@ static __always_inline int parse_ip6hdr(struct hdr_cursor *nh,
 	nh->pos += hdrsize;
 	*ip6hdr = ipv6;
 
+	//No se le hace ni hará bpf_ntohs o similares porque es solo un byte o menos.
 	return ipv6->nexthdr;
 }
 
@@ -124,12 +127,64 @@ static __always_inline int parse_icmp6hdr(struct hdr_cursor *nh,
 	return bpf_ntohs(icmpv6->icmp6_sequence);
 }
 
+/* Assignment 5 */
+
+static __always_inline int parse_ip4hdr(struct hdr_cursor *nh,
+					void *data_end,
+					struct iphdr **iphdr)
+{
+	struct iphdr * ipv4 = nh->pos;
+	int hdrsize = sizeof(*ipv4);
+
+	/* El tamaño de la cabecera IPv4 es dinámico, por lo que hay que hacer una comprobación en dos pasos*/
+
+	// Paso 1: Tamaño estático de la struct.
+	if(ipv4 + 1 > data_end)
+		return -1;
+
+	// Paso 2: cálculo según el número de words (bloques de 32 bits (4 bytes)) que pone en el campo de tamaño.
+	hdrsize = ipv4->ihl * 4; //Num de words * tamaño de una word en bytes = num bytes.
+	if(hdrsize < sizeof(*ipv4)) //Descartar que el ihl < 5 (Malformed package)
+		return -1;
+
+	if(nh->pos + hdrsize > data_end) //Comprobar que las opciones de verdad estén incluidas
+	/* Se hace con nh porque el compilador intrtpreta que se sumen los bytes directamente, si lo hacemos
+	 * con el puntero a struct iphdr, estaríamos sumando hdrsize veces el sizeof(struct iphdr).
+	 * Otra opción es hacerle un cast a void *, pero para eso usamos nh->pos.
+	 */
+		return -1;
+
+	nh->pos += hdrsize;
+	*iphdr = ipv4;
+
+	//No se le hace ni hará bpf_ntohs o similares porque es solo un byte o menos.
+	return ipv4->protocol;
+}
+
+static __always_inline int parse_icmp4hdr(struct hdr_cursor *nh,
+					  void *data_end,
+					  struct icmphdr **icmphdr)	
+{
+	struct icmphdr * icmpv4 = nh->pos;
+	int hdrsize = sizeof(*icmpv4);
+
+	if(icmpv4 + 1 > data_end)
+		return -1;
+
+	nh->pos += hdrsize;
+	*icmphdr = icmpv4;
+
+	return bpf_ntohs(icmpv4->un.echo.sequence);
+}
+
 SEC("xdp")
 int  xdp_parser_func(struct xdp_md *ctx)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct ethhdr *eth;
+	struct iphdr *ip;
+	struct icmphdr *icmp;
 	struct ipv6hdr *ipv6;
 	struct icmp6hdr *icmp6;
 	int sequence = -1;
@@ -152,24 +207,54 @@ int  xdp_parser_func(struct xdp_md *ctx)
 	 * header type in the packet correct?), and bounds checking.
 	 */
 	nh_type = parse_ethhdr(&nh, data_end, &eth);
-	if (nh_type != bpf_htons(ETH_P_IPV6))
-		goto out;
 
-	/* Assignment additions go below here */
-	nh_type = parse_ip6hdr(&nh, data_end, &ipv6);
-	if (nh_type != IPPROTO_ICMPV6)
-		goto out;
 
-	sequence = parse_icmp6hdr(&nh, data_end, &icmp6);
-	if(sequence == -1)
+
+	switch(nh_type)
 	{
-		action = XDP_ABORTED;
-		goto out;
-	}
-	if (sequence % 2 != 0)
-		goto out;
+		/* Assignment 5 */
+		case bpf_htons(ETH_P_IP):
+			nh_type = parse_ip4hdr(&nh, data_end, &ip);
+			if (nh_type != IPPROTO_ICMP)
+				goto out;
 
-	action = XDP_DROP;
+			sequence = parse_icmp4hdr(&nh, data_end, &icmp);
+			if(sequence == -1)
+			{
+				action = XDP_ABORTED;
+				goto out;
+			}
+			if (sequence % 2 != 0)
+				goto out;
+
+			action = XDP_DROP;
+			
+			break;
+
+		case bpf_htons(ETH_P_IPV6):
+			/* Assignment additions go below here */
+			nh_type = parse_ip6hdr(&nh, data_end, &ipv6);
+			//No se le hace ni hará bpf_ntohs o similares porque es solo un byte o menos.
+			if (nh_type != IPPROTO_ICMPV6)
+				goto out;
+
+			sequence = parse_icmp6hdr(&nh, data_end, &icmp6);
+			if(sequence == -1)
+			{
+				action = XDP_ABORTED;
+				goto out;
+			}
+			if (sequence % 2 != 0)
+				goto out;
+
+			action = XDP_DROP;
+
+			break;
+
+		default:
+			goto out;
+	}
+
 out:
 	return xdp_stats_record_action(ctx, action); /* read via xdp_stats */
 }
