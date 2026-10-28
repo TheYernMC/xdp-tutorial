@@ -72,6 +72,42 @@ static __always_inline int vlan_tag_pop(struct xdp_md *ctx, struct ethhdr *eth)
 static __always_inline int vlan_tag_push(struct xdp_md *ctx,
 					 struct ethhdr *eth, int vlid)
 {
+	void *data_end;
+	struct ethhdr eth_cpy;
+	struct vlan_hdr *vlh;
+	__be16 h_proto;
+
+	/* Comprobamos que no tenga VLAN */
+	if (proto_is_vlan(eth->h_proto))
+		return -1;
+
+	/* Guardamos ethhdr */
+	eth_cpy = *eth;
+	h_proto = eth->h_proto;
+
+	/* Ampliamos el paquete */
+	if (bpf_xdp_adjust_head(ctx, -(int)sizeof(struct vlan_hdr)))
+		return -1;
+
+	/* Recontextualizamos los punteros */
+	data_end = (void *)(long)ctx->data_end;
+	eth = (void *)(long)ctx->data;
+
+	/* Comprobamos los límites y reasignamos */
+	if(eth + 1 > data_end)
+		return -1;
+
+	vlh = (struct vlan_hdr *)(eth + 1);
+	if(vlh + 1 > data_end)
+		return -1;
+
+	*eth = eth_cpy;
+	eth->h_proto = bpf_htons(ETH_P_8021Q);
+
+	/* Asignamos la cabecera de VLAN con los nuevos valores */
+	vlh->h_vlan_TCI = bpf_htons(vlid & VLAN_VID_MASK);
+	vlh->h_vlan_encapsulated_proto = h_proto;
+
 	return 0;
 }
 
